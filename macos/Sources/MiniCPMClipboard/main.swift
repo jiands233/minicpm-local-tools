@@ -73,12 +73,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var handler: EventHandlerRef?
     var busy = false
     var activeProcess: Process?
+    var panel: NSWindow?
+    var panelStatus: NSTextField?
+    var panelShortcut: NSTextField?
+    var panelButtons: [NSButton] = []
+    var statusMessage = "就绪 · 请先复制文字或截图"
     let testingHotkey = CommandLine.arguments.contains("--self-test-hotkey")
     var hotkeyTriggers = 0
     var current = UserDefaults.standard.string(forKey: "action") ?? "todos"
     let actions = [("translate", "翻译"), ("rewrite", "简洁改写"), ("todos", "提取待办"), ("ocr", "截图转文字"), ("image-todos", "截图提取待办")]
     let shortcutLabels = ["⌃⌥C", "⌘⇧C", "⌘⌥C"]
-    var shortcut: Int { UserDefaults.standard.integer(forKey: "shortcut") }
+    var shortcut: Int { max(0, min(UserDefaults.standard.integer(forKey: "shortcut"), shortcutLabels.count - 1)) }
     var root: URL {
         if let path = ProcessInfo.processInfo.environment["MINICPM_PROJECT_ROOT"] { return URL(fileURLWithPath: path) }
         if let url = Bundle.main.url(forResource: "project-root", withExtension: "txt"),
@@ -87,6 +92,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if !actions.contains(where: { $0.0 == current }) { current = "todos" }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "CPM"
         makeMenu()
@@ -101,16 +107,126 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
         registerShortcut()
+        if !testingHotkey { openPanel() }
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openPanel()
+        return true
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func makePanel() {
+        guard panel == nil else { return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 620),
+                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = "MiniCPM 剪贴板"
+        window.isReleasedWhenClosed = false
+        window.center()
+        let content = NSView()
+        window.contentView = content
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 26),
+        ])
+        let title = NSTextField(labelWithString: "复制，处理，再粘贴")
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        stack.addArrangedSubview(title)
+        let instruction = NSTextField(wrappingLabelWithString: "先复制文字或中英文截图，再选择下面的动作。处理成功后，结果写回剪贴板，可到其他应用粘贴。")
+        instruction.font = .systemFont(ofSize: 13)
+        instruction.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(instruction)
+        instruction.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        let descriptions = ["翻成中文或英文", "保留原意，去掉冗余", "整理明确的任务", "识别中英文文字", "识别文字，再整理任务"]
+        for (index, action) in actions.enumerated() {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.spacing = 16
+            let button = NSButton(title: action.1, target: self, action: #selector(panelAction(_:)))
+            button.tag = index
+            button.bezelStyle = .rounded
+            button.controlSize = .large
+            button.setAccessibilityLabel(action.1)
+            button.widthAnchor.constraint(equalToConstant: 150).isActive = true
+            row.addArrangedSubview(button)
+            let detail = NSTextField(labelWithString: descriptions[index])
+            detail.textColor = .secondaryLabelColor
+            detail.font = .systemFont(ofSize: 12)
+            row.addArrangedSubview(detail)
+            stack.addArrangedSubview(row)
+            panelButtons.append(button)
+        }
+        let divider = NSBox()
+        divider.boxType = .separator
+        stack.addArrangedSubview(divider)
+        divider.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        let statusLabel = NSTextField(wrappingLabelWithString: statusMessage)
+        statusLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        statusLabel.setAccessibilityIdentifier("processing-status")
+        stack.addArrangedSubview(statusLabel)
+        statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        panelStatus = statusLabel
+        let shortcutLabel = NSTextField(wrappingLabelWithString: "")
+        shortcutLabel.textColor = .secondaryLabelColor
+        shortcutLabel.font = .systemFont(ofSize: 12)
+        stack.addArrangedSubview(shortcutLabel)
+        shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        panelShortcut = shortcutLabel
+        let footer = NSTextField(wrappingLabelWithString: "本机处理，不保存剪贴板历史。关闭窗口后，菜单栏 CPM 和快捷键仍可使用。")
+        footer.font = .systemFont(ofSize: 11)
+        footer.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(footer)
+        footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        panel = window
+        updatePanel()
+    }
+    @objc func openPanel() {
+        makePanel()
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    func updatePanel() {
+        panelStatus?.stringValue = statusMessage
+        let name = actions.first(where: { $0.0 == current })?.1 ?? "提取待办"
+        let language = UserDefaults.standard.string(forKey: "language") ?? "中文"
+        panelShortcut?.stringValue = "快捷键 \(shortcutLabels[shortcut]) · 当前动作：\(name) · 翻译目标：\(language)\n可从菜单栏 CPM 调整快捷键和翻译目标。"
+        for button in panelButtons { button.isEnabled = !busy }
+    }
+    func setStatus(_ message: String) {
+        statusMessage = message
+        status?.title = message
+        updatePanel()
+    }
+    @objc func panelAction(_ sender: NSButton) {
+        guard !busy, actions.indices.contains(sender.tag) else { return }
+        chooseAction(actions[sender.tag].0)
+    }
+    func chooseAction(_ action: String) {
+        guard !busy, actions.contains(where: { $0.0 == action }) else { return }
+        current = action
+        UserDefaults.standard.set(action, forKey: "action")
+        makeMenu()
+        runAction(action)
     }
     func makeMenu() {
         let menu = NSMenu()
-        status = NSMenuItem(title: "就绪 · 当前动作：\(actions.first(where: { $0.0 == current })?.1 ?? current)", action: nil, keyEquivalent: "")
+        menu.autoenablesItems = false
+        let panelItem = NSMenuItem(title: "打开工具面板", action: #selector(openPanel), keyEquivalent: "")
+        panelItem.target = self
+        menu.addItem(panelItem)
+        status = NSMenuItem(title: statusMessage, action: nil, keyEquivalent: "")
+        status.isEnabled = false
         menu.addItem(status)
         menu.addItem(NSMenuItem.separator())
         for (action, title) in actions {
             let entry = NSMenuItem(title: title, action: #selector(selectAction(_:)), keyEquivalent: "")
             entry.target = self; entry.representedObject = action
-            entry.state = action == current ? .on : .off; menu.addItem(entry)
+            entry.state = action == current ? .on : .off; entry.isEnabled = !busy; menu.addItem(entry)
         }
         let language = UserDefaults.standard.string(forKey: "language") ?? "中文"
         let translation = NSMenuItem(title: "翻译目标：\(language)", action: nil, keyEquivalent: "")
@@ -121,7 +237,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             languages.addItem(entry)
         }
         translation.submenu = languages; menu.addItem(translation)
-        let shortcutMenu = NSMenuItem(title: "快捷键：\(shortcutLabels[min(shortcut, 2)])", action: nil, keyEquivalent: "")
+        let shortcutMenu = NSMenuItem(title: "快捷键：\(shortcutLabels[shortcut])", action: nil, keyEquivalent: "")
         let bindings = NSMenu()
         for (index, title) in shortcutLabels.enumerated() {
             let entry = NSMenuItem(title: title, action: #selector(setShortcut(_:)), keyEquivalent: "")
@@ -134,29 +250,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         help.target = self; menu.addItem(help)
         menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
+        updatePanel()
     }
     func registerShortcut() {
         if let hotkey { UnregisterEventHotKey(hotkey) }
         let modifiers: [UInt32] = [UInt32(controlKey | optionKey), UInt32(cmdKey | shiftKey), UInt32(cmdKey | optionKey)]
-        let code = RegisterEventHotKey(UInt32(testingHotkey ? kVK_F19 : kVK_ANSI_C), testingHotkey ? UInt32(controlKey | cmdKey) : modifiers[min(shortcut, 2)], EventHotKeyID(signature: 0x4D43504D, id: 1), GetApplicationEventTarget(), 0, &hotkey)
-        if code != noErr { status.title = "快捷键已被占用，请换一个组合（\(code)）" }
+        let code = RegisterEventHotKey(UInt32(testingHotkey ? kVK_F19 : kVK_ANSI_C), testingHotkey ? UInt32(controlKey | cmdKey) : modifiers[shortcut], EventHotKeyID(signature: 0x4D43504D, id: 1), GetApplicationEventTarget(), 0, &hotkey)
+        if code != noErr { setStatus("快捷键已被占用，请换一个组合（\(code)）") }
     }
     @objc func setShortcut(_ sender: NSMenuItem) {
+        guard shortcutLabels.indices.contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: "shortcut"); makeMenu(); registerShortcut()
     }
     @objc func setLanguage(_ sender: NSMenuItem) {
-        UserDefaults.standard.set(sender.representedObject as? String, forKey: "language"); makeMenu()
+        guard let language = sender.representedObject as? String, ["中文", "English"].contains(language) else { return }
+        UserDefaults.standard.set(language, forKey: "language"); makeMenu()
     }
     @objc func selectAction(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? String else { return }
-        current = action; UserDefaults.standard.set(action, forKey: "action"); makeMenu(); runAction(action)
+        chooseAction(action)
     }
     @objc func openHelp() { NSWorkspace.shared.open(root.appendingPathComponent("docs/clipboard.md")) }
     func runAction(_ action: String) {
         guard !busy else { NSSound.beep(); return }
         let python = root.appendingPathComponent(".venv/bin/python")
         guard FileManager.default.isExecutableFile(atPath: python.path) else { showError("请先在项目目录运行 uv sync 安装 Python 工具集。"); return }
-        busy = true; item.button?.title = "CPM…"; status.title = "正在处理：\(action)"
+        busy = true
+        item.button?.title = "CPM…"
+        setStatus("正在处理：\(actions.first(where: { $0.0 == action })?.1 ?? action)")
+        makeMenu()
         let project = root
         let language = UserDefaults.standard.string(forKey: "language") ?? "中文"
         DispatchQueue.global(qos: .userInitiated).async {
@@ -182,16 +304,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 DispatchQueue.main.async {
                     self.activeProcess = nil; self.busy = false; self.item.button?.title = "CPM"
-                    if process.terminationStatus == 0 { self.status.title = "完成 · 可粘贴结果" }
+                    self.makeMenu()
+                    if process.terminationStatus == 0 { self.setStatus("完成 · 结果已写回剪贴板，可到其他应用粘贴") }
                     else { self.showError(message.isEmpty ? "处理失败或超时，剪贴板未主动写回。" : message) }
                 }
             } catch {
-                DispatchQueue.main.async { self.busy = false; self.item.button?.title = "CPM"; self.showError("无法启动本地工具：\(error.localizedDescription)") }
+                DispatchQueue.main.async { self.busy = false; self.item.button?.title = "CPM"; self.makeMenu(); self.showError("无法启动本地工具：\(error.localizedDescription)") }
             }
         }
     }
     func showError(_ message: String) {
-        status.title = "失败 · \(message.prefix(70))"
+        setStatus("失败 · \(message.prefix(120))")
         let alert = NSAlert(); alert.messageText = "剪贴板处理未完成"; alert.informativeText = message
         alert.addButton(withTitle: "知道了"); NSApp.activate(ignoringOtherApps: true); alert.runModal()
     }

@@ -158,3 +158,90 @@ def test_chat_disables_thinking_and_rejects_truncation(monkeypatch):
         client.chat("test")
     assert captured["reasoning_effort"] == "none"
     assert captured["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.parametrize(
+    ("original", "expected"),
+    [
+        (
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&utm_source=tracker",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        ),
+        ("https://m.youtube.com/watch?v=9bZkp7q19f0", "https://m.youtube.com/watch?v=9bZkp7q19f0"),
+        (
+            "https://www.bilibili.com/video/BV1234567890/?p=2&session=private",
+            "https://www.bilibili.com/video/BV1234567890/?p=2",
+        ),
+        (
+            "https://youtube.com.evil.example/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com.evil.example/watch",
+        ),
+        ("https://www.youtube.com/watch?v=not-a-public-video-id", "https://www.youtube.com/watch"),
+        (
+            "https://www.bilibili.com/video/BV1234567890/?p=private",
+            "https://www.bilibili.com/video/BV1234567890/",
+        ),
+    ],
+)
+def test_history_preserves_only_known_resource_parameters(original, expected):
+    assert clean_url(original) == expected
+
+
+def test_history_redaction_does_not_merge_different_pages(tmp_path):
+    from minicpm_tools.history import render
+
+    path = tmp_path / "History"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+    )
+    moment = int((dt.datetime(2026, 11, 12, 12, tzinfo=dt.UTC).timestamp() + 11644473600) * 1e6)
+    original = [
+        ("OCR video", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        ("Whale video", "https://www.youtube.com/watch?v=9bZkp7q19f0"),
+        ("Article A", "https://example.com/article?id=1&session=secret-a"),
+        ("Article B", "https://example.com/article?id=2&session=secret-b"),
+    ]
+    for serial, (title, url) in enumerate(original, 1):
+        db.execute("INSERT INTO urls VALUES(?,?,?)", (serial, title, url))
+        db.execute("INSERT INTO visits VALUES(?,?)", (serial, moment))
+    db.execute("INSERT INTO visits VALUES(1,?)", (moment + 1000000,))
+    db.commit()
+    db.close()
+    records = read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+    assert len(records) == 4
+    assert records[0]["visits"] == 2
+    assert records[0]["url"] != records[1]["url"]
+    assert not records[0]["link_redacted"]
+    assert records[2]["url"] == records[3]["url"] == "https://example.com/article"
+    assert records[2]["link_redacted"] and records[3]["link_redacted"]
+    report = render(records, "2026-11-12", "Asia/Shanghai")
+    assert "Article A" in report and "Article B" in report
+    assert report.count("可能无法回到原页面") == 2
+    assert "secret-a" not in report and "secret-b" not in report and "session=" not in report
+    assert "identity" not in records[0]
+
+
+def test_history_source_open_failure_is_actionable(tmp_path, monkeypatch):
+    path = tmp_path / "History"
+    path.touch()
+
+    def denied(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(sqlite3, "connect", denied)
+    with pytest.raises(ToolError, match="访问权限"):
+        read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+
+
+def test_history_snapshot_open_failure_closes_source(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    path = tmp_path / "History"
+    path.touch()
+    source = Mock()
+    connect = Mock(side_effect=[source, sqlite3.OperationalError("cannot create snapshot")])
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with pytest.raises(ToolError, match="历史数据库读取失败"):
+        read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+    source.close.assert_called_once()

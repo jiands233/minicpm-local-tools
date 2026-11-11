@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import re
 import sqlite3
 import tempfile
+from contextlib import closing
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from .client import LocalClient
@@ -26,7 +28,28 @@ def clean_url(raw):
             return None
         if SENSITIVE.search(url.path) or SENSITIVE.search(url.query):
             return None
-        return urlunsplit((url.scheme, url.netloc, url.path, "", ""))
+        # Preserve only known public resource selectors. Unknown query fields and
+        # fragments can contain credentials or private search text, so omit them.
+        parameters = parse_qsl(url.query, keep_blank_values=True, max_num_fields=100)
+        retained = []
+        if (
+            url.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}
+            and url.path == "/watch"
+        ):
+            retained = [
+                (key, value)
+                for key, value in parameters
+                if key == "v" and re.fullmatch(r"[A-Za-z0-9_-]{11}", value)
+            ][:1]
+        elif url.hostname in {"bilibili.com", "www.bilibili.com"} and url.path.startswith(
+            "/video/"
+        ):
+            retained = [
+                (key, value)
+                for key, value in parameters
+                if key == "p" and re.fullmatch(r"[1-9][0-9]{0,4}", value)
+            ][:1]
+        return urlunsplit((url.scheme, url.netloc, url.path, urlencode(retained), ""))
     except ValueError:
         return None
 
@@ -41,32 +64,35 @@ def read_history(path: Path, browser: str, day: dt.date, timezone: str):
         raise ToolError(f"找不到历史库：{path}；可用 --database 指定 profile 路径。")
     with tempfile.TemporaryDirectory(prefix="mcpm-history-") as tmp:
         # SQLite backup API includes committed WAL data, without an unsafe bare file copy.
-        source = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
-        target = sqlite3.connect(str(Path(tmp) / "snapshot.sqlite"))
         try:
-            source.backup(target)
-            if browser == "chrome":
-                query = """SELECT v.visit_time, u.title, u.url FROM visits v JOIN urls u ON u.id=v.url
-                           WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
-            else:
-                query = """SELECT v.visit_time, v.title, i.url FROM history_visits v
-                           JOIN history_items i ON i.id=v.history_item
-                           WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
-            rows = target.execute(query, (lower, upper)).fetchall()
+            with (
+                closing(
+                    sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
+                ) as source,
+                closing(sqlite3.connect(str(Path(tmp) / "snapshot.sqlite"))) as target,
+            ):
+                source.backup(target)
+                if browser == "chrome":
+                    query = """SELECT v.visit_time, u.title, u.url FROM visits v JOIN urls u ON u.id=v.url
+                               WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
+                else:
+                    query = """SELECT v.visit_time, v.title, i.url FROM history_visits v
+                               JOIN history_items i ON i.id=v.history_item
+                               WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
+                rows = target.execute(query, (lower, upper)).fetchall()
         except sqlite3.Error as exc:
             raise ToolError("历史数据库读取失败，请检查浏览器类型、访问权限和数据库结构。") from exc
-        finally:
-            source.close()
-            target.close()
     result = []
     seen = {}
     for timestamp, title, raw in rows:
         url = clean_url(raw)
         if not url:
             continue
-        # One row per canonical URL; count repeats, never infer dwell time.
-        if url in seen:
-            seen[url]["visits"] += 1
+        # Redaction must not collapse distinct resources. Only the digest stays
+        # in memory; the original URL/query is never written to the report.
+        identity = hashlib.sha256(raw.encode("utf-8")).digest()
+        if identity in seen:
+            seen[identity]["visits"] += 1
             continue
         entry = {
             "id": len(result) + 1,
@@ -75,8 +101,10 @@ def read_history(path: Path, browser: str, day: dt.date, timezone: str):
             "url": url,
             "domain": urlsplit(url).hostname,
             "visits": 1,
+            "link_redacted": urlsplit(raw).query != urlsplit(url).query
+            or bool(urlsplit(raw).fragment),
         }
-        seen[url] = entry
+        seen[identity] = entry
         result.append(entry)
     return result
 
@@ -125,7 +153,7 @@ def render(entries, day, zone, groups=None):
         f"# 阅读回顾 · {day}",
         "",
         f"时区：{zone}。仅依据本机访问记录的标题和域名，不代表读完或理解页面。",
-        "URL 查询参数和片段已移除；规则过滤不能保证消除所有敏感内容。",
+        "仅保留已知站点的公开页面编号，其他 URL 查询参数和片段已隐藏；规则过滤不能保证消除所有敏感内容。",
         "",
     ]
     if groups:
@@ -138,8 +166,9 @@ def render(entries, day, zone, groups=None):
         lines.append("当天没有符合筛选条件的访问记录。")
     for row in entries:
         safe_link = row["url"].replace("(", "%28").replace(")", "%29").replace(" ", "%20")
+        redaction = " · 链接参数已隐藏，可能无法回到原页面" if row.get("link_redacted") else ""
         lines.append(
-            f"- {row['id']}. {row['time']} [{escape(row['title'])}]({safe_link}) · {escape(row['domain'])} · {row['visits']} 次访问"
+            f"- {row['id']}. {row['time']} [{escape(row['title'])}]({safe_link}) · {escape(row['domain'])} · {row['visits']} 次访问{redaction}"
         )
     return "\n".join(lines) + "\n"
 

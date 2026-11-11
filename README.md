@@ -10,7 +10,7 @@
 | 阅读回顾 | `mcpm history` | Chrome/Safari 按日期导出，过滤和去重，本地主题归类 |
 | 命令助手 | `mcpm shell` | 生成、解释、预览；交互确认后执行有限的只读命令 |
 
-详细说明：[剪贴板](docs/clipboard.md)、[搜索](docs/search.md)、[音频](docs/audio.md)、[阅读回顾](docs/history.md)、[命令助手](docs/shell.md)。[迭代记录](docs/PROGRESS.md)区分已经验证的行为和待完成项。
+详细说明：[剪贴板](docs/clipboard.md)、[搜索](docs/search.md)、[音频](docs/audio.md)、[阅读回顾](docs/history.md)、[命令助手](docs/shell.md)。[迭代记录](docs/PROGRESS.md)区分已经验证的行为和待完成项；[模型验收脚本](docs/verification.md)可重跑合成样本。
 
 ## 安装
 
