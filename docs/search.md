@@ -1,0 +1,98 @@
+# 本地文件夹搜索 MVP
+
+只读取你在命令里指定的资料文件夹，支持 UTF-8 `.md` / `.txt` 和 `.pdf`。默认建立本地 embedding 语义索引；查询默认结合向量相似度和关键词匹配。MiniCPM5 可以改写查询或解释摘录，但不充当 embedding 模型。
+
+## 安装和运行
+
+```sh
+uv sync --extra pdf
+# 配置已经启动的本地 OpenAI 兼容 embedding 服务。
+export MINICPM_EMBED_URL=http://127.0.0.1:11434/v1
+export MINICPM_EMBED_MODEL=bge-m3
+# 扫描 PDF 另外需要已经启动的 MiniCPM-OCR 服务。
+export MINICPM_OCR_URL=http://127.0.0.1:11434/v1
+export MINICPM_OCR_MODEL=minicpm-ocr
+
+uv run mcpm search index ./examples/search-corpus --index ./.data/search.sqlite
+uv run mcpm search query '海洋哺乳动物' --index ./.data/search.sqlite
+uv run mcpm search query '矩阵求逆的笔记' --index ./.data/search.sqlite --rewrite --explain
+uv run mcpm search query '课程作业截止日期' --index ./.data/search.sqlite --open 1
+```
+
+`--open 1` 用 macOS 默认应用打开第一个结果的原文件。结果同时显示 PDF 页码（打开应用时不保证跳转到该页）、原始摘录、评分和文字来源。`--explain` 让 MiniCPM 从摘录中选择一句原文依据，只有逐字匹配原文的引用才显示；其余输出显示“无法确认相关性”。选中原文也不保证相关，仍须核对。`--rewrite` 只接受简短单行，格式不合格时保留原始查询并显示提示。
+
+尚未安装模型时，先使用明确标注的关键词模式检验文件流程：
+
+```sh
+uv run mcpm search index ./examples/search-corpus --index ./.data/keyword.sqlite --mode keyword --no-ocr
+uv run mcpm search query '鲸鱼' --index ./.data/keyword.sqlite
+uv run mcpm search query '矩阵' --index ./.data/keyword.sqlite
+```
+
+关键词模式不等于语义检索；只支持词汇重叠，中文使用相邻双字匹配。它不会自动升级成语义索引。准备好 embedding 服务后，使用 `--mode semantic --replace` 重建；查询时换 embedding 模型也必须重建。索引只在提取和 embedding 全部成功后替换旧版本；失败或 Ctrl+C 保留旧索引。
+
+## PDF、范围和限制
+
+- 每个 PDF 默认只处理前 20 页，通过 `--max-pages N` 调整，最大 500 页。
+- 文字层少于 20 个非空白字符时，按扫描页渲染图片并顺序调用 `MiniCPM-OCR`。图片最长边限制 2500 像素，无 OCR 并发。`--no-ocr` 会明确报告跳过的页面。
+- OCR 只面向中英文，不保证德语、表格版式和公式重建；不是官方 PP-DocLayoutV3 完整版面流水线。来源：[MiniCPM-OCR 官方仓库](https://github.com/OpenBMB/MiniCPM-OCR)。
+- PDF 提取和渲染依赖 `pypdfium2`，渲染图片依赖 Pillow。损坏 PDF 或 OCR/embedding 失败会中止本次构建，避免把残缺索引报告成成功。
+- 不跟随符号链接，不读取隐藏文件或隐藏目录；不允许直接指定整个家目录或磁盘根目录。每个文件限制 100 MiB。
+- 索引包含原文片段、文件绝对路径和 embedding，保存在显式 `--index` 路径。临时 OCR 图片位于系统临时目录，调用后删除。共享索引前请检查隐私。
+- 查询过滤已删除或移到目录外的文件；内容变化需要手动 `--replace`。当前没有文件监听、自动增量索引、全盘搜索或跨设备同步。
+- 向量使用 SQLite JSON 存储和 Python 余弦计算，适合小型文件夹，查询复杂度与片段数量成正比。没有宣称超过专用向量数据库或既有搜索产品。
+- 语义评分不是正确率或置信度；语义检索可能返回不相关的 Top-K。以可打开的来源与摘录为准。
+
+## 已执行的验证（2026-11-12，Apple Silicon）
+
+真实 Ollama 服务监听 `127.0.0.1:11434`。Embedding 使用 `gpustack/bge-m3-GGUF` 的 `bge-m3-Q4_K_M.gguf`，输出 1024 维向量；OCR 使用本地 `minicpm-ocr`。全部输入都是本项目编写的合成示例，未读取用户私人文件。
+
+| 查询 | 已观测首条结果 | 首条评分 | 第二条评分 |
+| --- | --- | --- | --- |
+| 海洋中呼吸空气的动物 | `marine.md` | 0.646 | 0.179 |
+| 求逆的数学学习资料 | `algebra.txt` | 0.539 | 0.308 |
+| 什么时候交数学作业 | `scan-notice.pdf`，第 1 页，来源 OCR | 0.589 | 0.236 |
+| 海洋里的蓝鲸吃什么 | `text-marine.pdf`，第 1 页，来源文字层 | 0.472 | 0.197 |
+
+扫描页没有文字层。MiniCPM-OCR 实际识别出的内容包含“请在周五下午三点前提交矩阵求逆作业。”“负责人：张老师。”以及对应英文截止时间。这些内容与生成图片一致。一次构建 2 个 PDF、提取 2 段（其中 1 页 OCR）并完成后两个查询共约 5.44 秒；这是本机单次观测，不是性能基准或真实文档准确率评测。
+
+可复现命令（输出索引若已经存在，确认后加 `--replace`；示例生成器拒绝覆盖文件）：
+
+```sh
+uv run --extra pdf python examples/search_make_fixtures.py .local/search-fixtures
+uv run mcpm search index examples/search-corpus --index .local/search-semantic.sqlite --no-ocr
+uv run mcpm search query '海洋中呼吸空气的动物' --index .local/search-semantic.sqlite --top-k 1 --json
+uv run mcpm search query '求逆的数学学习资料' --index .local/search-semantic.sqlite --top-k 1
+uv run mcpm search index .local/search-fixtures --index .local/search-ocr-semantic.sqlite --max-pages 1
+uv run mcpm search query '什么时候交数学作业' --index .local/search-ocr-semantic.sqlite --top-k 1
+uv run mcpm search query '海洋里的蓝鲸吃什么' --index .local/search-ocr-semantic.sqlite --top-k 1
+```
+
+本次 BGE 权重来源为 [GPUStack 转换仓库固定版本](https://huggingface.co/gpustack/bge-m3-GGUF/tree/2d48f1737679ad900d5c26c5aad5410e9c70fdca)，是 BAAI/bge-m3 的 GGUF 转换，不是 MiniCPM 模型。下载文件大小 `437778496` 字节，已按仓库 LFS 信息验证 SHA256：
+
+```text
+6d39681b26c61279ac1f82db35a04a05009e94c415b51c858ff571489a82fc06
+```
+
+本机使用的 Modelfile 内容：
+
+```text
+FROM ./bge-m3-Q4_K_M.gguf
+PARAMETER num_ctx 8192
+```
+
+通过 `ollama create bge-m3 -f Modelfile.bge-m3` 导入，使用同一模型建立索引和查询。该量化模型的实际效果与 Ollama 官方库同名模型不保证完全一致；复现评分请使用相同权重。模型安装后，搜索流程仅调用 loopback 服务，不访问远程模型接口。
+
+第一次使用 MiniCPM5-1B 的自由文本“改写 + 解释”时，模型返回冗长且无依据的拒绝说明。基于这个实际失败，已把解释改成可核验的原文引用，并对改写增加格式检查；这两项属于可选增强，不影响已经验证的 embedding + OCR 检索流程。
+
+修改后实际运行以下命令，仍命中扫描通知第 1 页，并返回通过逐字检查的依据：“请在周五下午三点前提交矩阵求逆作业。”
+
+```sh
+uv run mcpm search query '什么时候交数学作业' --index .local/search-ocr-semantic.sqlite --top-k 1 --rewrite --explain --json
+```
+
+## 自动化验证边界
+
+`tests/test_search.py` 使用确定性的 fake embedding/OCR 客户端验证排序、模型一致性、批次限制、页码、扫描页分支、符号链接边界、索引失败回滚和临时文件清理；它不能证明真实 MiniCPM OCR 准确率或 embedding 检索质量。
+
+`examples/search-corpus` 中两个文本文件与生成的扫描 PDF 是专门编写的演示资料，不是用户真实课程数据。真实模型结果见上表；自动化单元测试不替代这些实际调用。复杂排版、低清扫描、长文档和用户真实资料尚未评测。

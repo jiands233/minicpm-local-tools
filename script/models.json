@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "reviewed_date": "2026-11-12",
+  "hash_provenance": "HF /api/models/{repo}/tree/{revision}: LFS oid is SHA256. Small config.json additionally verified against API Git blob SHA1. Ollama digest from GitHub release API.",
+  "components": {
+    "text-1b": {
+      "kind": "text",
+      "repo": "openbmb/MiniCPM5-1B-GGUF",
+      "revision": "5385560dd3e232bcc3577fd9442c332cad2facbd",
+      "model_name": "openbmb/minicpm5",
+      "files": [
+        {
+          "path": "MiniCPM5-1B-Q4_K_M.gguf",
+          "destination": ".local/gguf/MiniCPM5-1B-Q4_K_M.gguf",
+          "size": 688065920,
+          "sha256": "81b64d05a23b17b34c475f42b3e72fbde62d4b92cc34541f7a8031d0752deafa"
+        }
+      ]
+    },
+    "text-2b": {
+      "kind": "text",
+      "repo": "openbmb/MiniCPM5-2B-GGUF",
+      "revision": "8ad02b786ab81e33d465e1c80562640c55ab2877",
+      "model_name": "minicpm5-2b",
+      "files": [
+        {
+          "path": "MiniCPM5-2B-Q4_K_M.gguf",
+          "destination": ".local/gguf/MiniCPM5-2B-Q4_K_M.gguf",
+          "size": 1561318368,
+          "sha256": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd"
+        }
+      ]
+    },
+    "ocr": {
+      "kind": "ocr",
+      "repo": "openbmb/MiniCPM-OCR-1.0-gguf",
+      "revision": "0133ad8db635210441a55dcf421e25bfb9915142",
+      "model_name": "minicpm-ocr",
+      "files": [
+        {
+          "path": "MiniCPM-OCR-1_0-Q8_0.gguf",
+          "destination": ".local/gguf/MiniCPM-OCR-1_0-Q8_0.gguf",
+          "size": 811598432,
+          "sha256": "791486a476bdacb48acb3f31aa3a18dbb5be87e723a4074bcd13a37d61c852e2"
+        },
+        {
+          "path": "mmproj-model-f16-4x.gguf",
+          "destination": ".local/gguf/mmproj-model-f16-4x.gguf",
+          "size": 901017536,
+          "sha256": "ceed82261b3b1380c3165f8b37c10117a50093be1362cbfeeb692fa036444682"
+        }
+      ]
+    },
+    "embedding": {
+      "kind": "embedding",
+      "repo": "gpustack/bge-m3-GGUF",
+      "revision": "2d48f1737679ad900d5c26c5aad5410e9c70fdca",
+      "model_name": "bge-m3",
+      "files": [
+        {
+          "path": "bge-m3-Q4_K_M.gguf",
+          "destination": ".local/models/bge-m3-Q4_K_M.gguf",
+          "size": 437778496,
+          "sha256": "6d39681b26c61279ac1f82db35a04a05009e94c415b51c858ff571489a82fc06"
+        }
+      ]
+    },
+    "whisper-tiny": {
+      "kind": "whisper",
+      "repo": "mlx-community/whisper-tiny",
+      "revision": "78c52ab98ca87f570bc57ad852e15ef7060f9f76",
+      "model_name": null,
+      "files": [
+        {
+          "path": "config.json",
+          "destination": ".local/whisper-tiny/config.json",
+          "size": 262,
+          "sha256": "aaff20ce8f69beddee3fe0cc1e08f4e92f58586cb9f12ba00a6f73cbfec1cb1c",
+          "git_blob_sha1": "a5f93cd58e229a777d10e77c753693018cd25264"
+        },
+        {
+          "path": "weights.npz",
+          "destination": ".local/whisper-tiny/weights.npz",
+          "size": 74418182,
+          "sha256": "d5a3b8671ac7aab11a2c9d0f16e7da94bad5500d785856f438c6bd44c3723944"
+        }
+      ]
+    },
+    "runtime": {
+      "kind": "runtime",
+      "version": "0.40.16",
+      "source": "https://api.github.com/repos/ollama/ollama/releases/tags/v0.40.16",
+      "files": [
+        {
+          "path": "ollama-darwin.tgz",
+          "destination": ".local/runtime/ollama-darwin.tgz",
+          "size": 186116182,
+          "sha256": "a743717494315da7cd352982b805f6b992d4b4452ca117fd5fbf86c4ee46fca0",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.16/ollama-darwin.tgz"
+        }
+      ]
+    }
+  }
+}

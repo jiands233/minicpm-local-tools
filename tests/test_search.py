@@ -1,0 +1,230 @@
+"""Deterministic unit/integration fixtures, not model-quality benchmarks."""
+
+import json
+import runpy
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from minicpm_tools.common import ToolError
+from minicpm_tools.search import index_folder, search_index
+
+
+class FakeClient:
+    embedding_model = "unit-test-only"
+
+    def __init__(self):
+        self.batches = []
+        self.images = []
+
+    def embed(self, texts):
+        self.batches.append(texts)
+        return [
+            [1.0, 0.01]
+            if any(word in text for word in ("biology", "鲸鱼", "ocean"))
+            else [0.01, 1.0]
+            for text in texts
+        ]
+
+    def ocr(self, image):
+        assert Path(image).is_file()
+        self.images.append(str(image))
+        return "课程通知：周五下午三点提交数学作业。"
+
+    def chat(self, prompt, system=""):
+        return "此摘录包含查询主题。"
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "marine.md").write_text(
+        "Marine biology studies whales and the ocean.", encoding="utf-8"
+    )
+    (root / "algebra.txt").write_text(
+        "线性代数笔记：矩阵求逆、行列式与数学作业。", encoding="utf-8"
+    )
+    return root, tmp_path / "index.sqlite"
+
+
+def test_semantic_query_without_literal_overlap_and_model_identity(corpus):
+    root, index = corpus
+    client = FakeClient()
+    result = index_folder(root, index, client=client)
+    assert result["files"] == 2
+    hits = search_index(index, "鲸鱼", client=client, mode="semantic")
+    assert hits[0].path.endswith("marine.md")
+    assert "鲸鱼" not in hits[0].excerpt
+    client.embedding_model = "different-model"
+    with pytest.raises(ToolError, match="模型与索引不一致"):
+        search_index(index, "鲸鱼", client=client)
+
+
+def test_keyword_mode_requires_no_model_calls(corpus):
+    root, index = corpus
+    client = FakeClient()
+    index_folder(root, index, mode="keyword", client=client)
+    assert search_index(index, "矩阵", client=client)[0].path.endswith("algebra.txt")
+    assert search_index(index, "biology", client=client)[0].path.endswith("marine.md")
+    assert search_index(index, "nonexistentterm", client=client) == []
+    assert client.batches == []
+    with pytest.raises(ToolError, match="只有关键词"):
+        search_index(index, "biology", client=client, mode="semantic")
+
+
+def test_failed_rebuild_and_interruption_preserve_existing_index(corpus):
+    root, index = corpus
+    index_folder(root, index, client=FakeClient())
+    before = index.read_bytes()
+
+    class BrokenClient(FakeClient):
+        def embed(self, texts):
+            raise ToolError("offline")
+
+    with pytest.raises(ToolError, match="offline"):
+        index_folder(root, index, client=BrokenClient(), replace=True)
+    assert index.read_bytes() == before
+    with pytest.raises(ToolError, match="已存在"):
+        index_folder(root, index, client=FakeClient())
+
+    def interrupt(message):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        index_folder(root, index, client=FakeClient(), replace=True, progress=interrupt)
+    assert index.read_bytes() == before
+    assert list(index.parent.glob(".index.sqlite.*")) == []
+
+
+def test_symlink_escape_and_deleted_results_excluded(corpus, tmp_path):
+    root, index = corpus
+    outside = tmp_path / "private"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("biology private secret")
+    (root / "linked-file.txt").symlink_to(secret)
+    (root / "linked-directory").symlink_to(outside, target_is_directory=True)
+    result = index_folder(root, index, mode="keyword", client=FakeClient())
+    assert result["files"] == 2
+    (root / "marine.md").unlink()
+    assert search_index(index, "biology", client=FakeClient()) == []
+
+
+def test_large_document_is_chunked_and_embedding_batches_bounded(corpus):
+    root, index = corpus
+    (root / "long.md").write_text("marine biology ocean " * 4000)
+    client = FakeClient()
+    index_folder(root, index, client=client)
+    assert all(0 < len(batch) <= 16 for batch in client.batches)
+    assert all(len(part) <= 1200 for batch in client.batches for part in batch)
+    assert len(search_index(index, "鲸鱼", client=client)) == 3
+
+
+def test_wrong_vector_dimension_rejected(corpus):
+    root, index = corpus
+    index_folder(root, index, client=FakeClient())
+
+    class WrongShape(FakeClient):
+        def embed(self, texts):
+            return [[1, 2, 3] for _ in texts]
+
+    with pytest.raises(ToolError, match="维度"):
+        search_index(index, "biology", client=WrongShape())
+
+
+def test_pdf_ocr_page_limit_and_cleanup(corpus):
+    pdfium = pytest.importorskip("pypdfium2")
+    pytest.importorskip("PIL")
+    root, index = corpus
+    document = pdfium.PdfDocument.new()
+    for _ in range(3):
+        page = document.new_page(200, 200)
+        page.close()
+    document.save(root / "notice.pdf")
+    document.close()
+    client = FakeClient()
+    result = index_folder(root, index, client=client, mode="keyword", max_pages=1)
+    assert result["ocr_pages"] == 1
+    assert len(client.images) == 1
+    assert not Path(client.images[0]).exists()
+    hits = search_index(index, "周五下午", client=client)
+    assert hits[0].path.endswith("notice.pdf")
+    assert hits[0].page == 1 and hits[0].source == "ocr"
+
+
+def test_no_ocr_explicitly_skips_blank_pdf(corpus):
+    pdfium = pytest.importorskip("pypdfium2")
+    root, index = corpus
+    document = pdfium.PdfDocument.new()
+    page = document.new_page(200, 200)
+    page.close()
+    document.save(root / "blank.pdf")
+    document.close()
+    client = FakeClient()
+    messages = []
+    result = index_folder(
+        root, index, client=client, mode="keyword", ocr=False, progress=messages.append
+    )
+    assert result["ocr_pages"] == 0 and client.images == []
+    assert any("--no-ocr" in message for message in messages)
+
+
+def test_text_layer_pdf_does_not_call_ocr(corpus):
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("PIL")
+    root, index = corpus
+    helper = runpy.run_path(str(Path(__file__).parents[1] / "examples/search_make_fixtures.py"))
+    (root / "biology.pdf").write_bytes(
+        helper["text_pdf"](["Marine biology studies whales in the ocean."])
+    )
+    client = FakeClient()
+    index_folder(root, index, client=client, mode="keyword")
+    hits = search_index(index, "Marine biology studies whales", client=client)
+    pdf_hits = [hit for hit in hits if hit.path.endswith("biology.pdf")]
+    assert pdf_hits and pdf_hits[0].page == 1 and pdf_hits[0].source == "text"
+    assert client.images == []
+
+
+def test_index_metadata_persists_root_and_mode(corpus):
+    root, index = corpus
+    index_folder(root, index, client=FakeClient(), mode="keyword")
+    with sqlite3.connect(index) as db:
+        metadata = {k: json.loads(v) for k, v in db.execute("SELECT key,value FROM metadata")}
+    assert metadata["root"] == str(root.resolve())
+    assert metadata["mode"] == "keyword"
+
+
+def test_explanation_rejects_invented_quotes_and_accepts_verbatim_evidence(corpus):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+
+    class QuoteClient(FakeClient):
+        def __init__(self, response):
+            super().__init__()
+            self.response = response
+
+        def chat(self, prompt, system=""):
+            return self.response
+
+    fake = QuoteClient('{"quote":"The homework is due tomorrow."}')
+    hits = search_index(index, "biology", client=fake, explain=True)
+    assert "无法确认相关性" in hits[0].reason
+    correct = QuoteClient('{"quote":"Marine biology studies whales and the ocean."}')
+    hits = search_index(index, "biology", client=correct, explain=True)
+    assert "模型选取的原文依据" in hits[0].reason
+    assert "Marine biology studies whales and the ocean." in hits[0].excerpt
+
+
+def test_verbose_rewrite_falls_back_to_original_query(corpus, capsys):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+
+    class VerboseClient(FakeClient):
+        def chat(self, prompt, system=""):
+            return "irrelevant invented facts\n" * 20
+
+    hits = search_index(index, "biology", client=VerboseClient(), rewrite=True)
+    assert hits[0].path.endswith("marine.md")
+    assert "使用原始查询" in capsys.readouterr().err
