@@ -16,6 +16,32 @@ def test_doctor_handles_malformed_model_lists(monkeypatch, capsys, payload):
     assert "Traceback" not in result.err
 
 
+def test_doctor_hides_custom_endpoint_paths_but_requests_actual_url(monkeypatch, capsys):
+    address = "http://127.0.0.1:12345/v1/private-example-token"
+    client = LocalClient(base_url=address)
+    calls = []
+
+    def fake_request(url, route):
+        calls.append((url, route))
+        return {"data": [{"id": name} for name in (client.model, client.ocr_model, client.embedding_model)]}
+
+    monkeypatch.setattr(LocalClient, "from_env", lambda: client)
+    monkeypatch.setattr(client, "_request", fake_request)
+    assert run_doctor(None) == 0
+    output = capsys.readouterr().out
+    assert output.count("http://127.0.0.1:12345/[路径已隐藏]") == 3
+    assert "private-example-token" not in output
+    assert calls == [(address, "/models")] * 3
+
+
+def test_doctor_keeps_standard_path_and_ipv6_origin(capsys, monkeypatch):
+    client = LocalClient(base_url="http://[::1]:12345/v1")
+    monkeypatch.setattr(LocalClient, "from_env", lambda: client)
+    monkeypatch.setattr(client, "_request", lambda *args: {"data": []})
+    assert run_doctor(None) == 1
+    assert "http://[::1]:12345/v1" in capsys.readouterr().out
+
+
 def test_embedding_oversized_number_reports_invalid_vector(monkeypatch):
     client = LocalClient()
     monkeypatch.setattr(

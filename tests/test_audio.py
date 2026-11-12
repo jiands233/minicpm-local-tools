@@ -1,5 +1,6 @@
 import argparse
 import json
+import shlex
 import shutil
 import sys
 import wave
@@ -395,6 +396,30 @@ def test_summary_failure_keeps_transcript(tmp_path, monkeypatch):
     assert len(runs) == 1
     assert (runs[0] / 'transcript.json').exists()
     assert not (runs[0] / 'summary.md').exists()
+
+
+def test_summary_retry_uses_current_python_and_preserves_chunk_size(tmp_path, monkeypatch):
+    from minicpm_tools import audio
+
+    source = tmp_path / 'source with spaces.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 3, 'text': '保留我'}]}))
+    out = tmp_path / 'output with spaces'
+    args = argparse.Namespace(input=None, transcript_json=source, chunk_chars=750,
+                              output_dir=out, no_summary=False)
+
+    class BrokenClient:
+        def chat(self, *args, **kwargs):
+            raise ToolError('offline')
+
+    monkeypatch.setattr(audio.LocalClient, 'from_env', lambda: BrokenClient())
+    with pytest.raises(ToolError) as error:
+        handle(args)
+    retry = str(error.value).split('可重试：', 1)[1]
+    argv = shlex.split(retry)
+    run, = out.iterdir()
+    assert argv == [sys.executable, '-m', 'minicpm_tools', 'audio', '--transcript-json',
+                    str(run / 'transcript.json'), '--output-dir', str(out), '--chunk-chars', '750']
+    assert (run / 'transcript.json').exists() and not (run / 'summary.md').exists()
 
 
 @pytest.mark.parametrize('field,bad_value', [

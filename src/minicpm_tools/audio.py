@@ -516,7 +516,13 @@ def handle(args) -> int:
             notes = summarize(segments, LocalClient.from_env(), args.chunk_chars)
             write_new(run / "summary.md", render_notes(notes, source.name))
         except ToolError as exc:
-            retry = shlex.join(["mcpm", "audio", "--transcript-json", str(run / "transcript.json"), "--output-dir", str(args.output_dir)])
+            # Use the interpreter that is actually running the tool: `mcpm`
+            # may not be on PATH when the project venv was not activated.
+            retry = shlex.join([
+                sys.executable, "-m", "minicpm_tools", "audio",
+                "--transcript-json", str(run / "transcript.json"),
+                "--output-dir", str(args.output_dir), "--chunk-chars", str(args.chunk_chars),
+            ])
             raise ToolError(f"{exc}\n可重试：{retry}") from exc
     print(run)
     return 0

@@ -115,9 +115,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: NSWindow?
     var panelStatus: NSTextField?
     var panelShortcut: NSTextField?
+    var shortcutProbeButton: NSButton?
     var panelButtons: [NSButton] = []
     var statusMessage = "就绪 · 请先复制文字或截图"
     var shortcutError: String?
+    var shortcutProbeArmed = false
     let testingHotkey = CommandLine.arguments.contains("--self-test-hotkey")
     var hotkeyTriggers = 0
     var current = UserDefaults.standard.string(forKey: "action") ?? "todos"
@@ -140,10 +142,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let installCode = InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
             guard let context else { return OSStatus(eventNotHandledErr) }
             let app = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
-            DispatchQueue.main.async {
-                if app.testingHotkey { app.hotkeyTriggers += 1 }
-                else { app.runAction(app.current) }
-            }
+            DispatchQueue.main.async { app.receiveHotkey() }
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
         if reportHandlerInstallation(installCode, installed: handler != nil) {
@@ -219,6 +218,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         stack.addArrangedSubview(shortcutLabel)
         shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         panelShortcut = shortcutLabel
+        let probe = NSButton(title: "测试快捷键（不读取剪贴板）", target: self, action: #selector(toggleShortcutProbe(_:)))
+        probe.bezelStyle = .rounded
+        probe.setAccessibilityIdentifier("shortcut-probe")
+        stack.addArrangedSubview(probe)
+        shortcutProbeButton = probe
         let footer = NSTextField(wrappingLabelWithString: "本机处理，不保存剪贴板历史。关闭窗口后，菜单栏 CPM 和快捷键仍可使用。")
         footer.font = .systemFont(ofSize: 11)
         footer.textColor = .secondaryLabelColor
@@ -238,6 +242,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let language = UserDefaults.standard.string(forKey: "language") ?? "中文"
         panelShortcut?.stringValue = "快捷键 \(shortcutLabels[shortcut]) · 当前动作：\(name) · 翻译目标：\(language)\n可从菜单栏 CPM 调整快捷键和翻译目标。"
         for button in panelButtons { button.isEnabled = !busy }
+        shortcutProbeButton?.isEnabled = !busy
+        shortcutProbeButton?.title = shortcutProbeArmed ? "取消快捷键测试" : "测试快捷键（不读取剪贴板）"
     }
     var displayedStatus: String {
         guard let shortcutError else { return statusMessage }
@@ -264,12 +270,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if code == noErr && registered { setShortcutError(nil) }
         else { setShortcutError("快捷键注册失败，请换一个组合（\(code)）") }
     }
+    // The armed probe consumes exactly one hotkey event without invoking the
+    // action, subprocess, or system pasteboard. It can be cancelled in-panel.
+    @objc func toggleShortcutProbe(_ sender: Any?) {
+        guard !busy else { return }
+        if shortcutProbeArmed {
+            shortcutProbeArmed = false
+            setStatus("已取消快捷键测试。")
+        } else if hotkey == nil || handler == nil || shortcutError != nil {
+            setStatus("快捷键未成功注册，请先检查快捷键状态。")
+        } else {
+            shortcutProbeArmed = true
+            setStatus("等待快捷键 \(shortcutLabels[shortcut]) · 本次不会读取剪贴板")
+        }
+    }
+    func receiveHotkey() {
+        if shortcutProbeArmed {
+            shortcutProbeArmed = false
+            setStatus("已收到快捷键 · 测试未读取剪贴板，可继续正常使用")
+        } else if testingHotkey {
+            hotkeyTriggers += 1
+        } else {
+            runAction(current)
+        }
+    }
     @objc func panelAction(_ sender: NSButton) {
         guard !busy, actions.indices.contains(sender.tag) else { return }
         chooseAction(actions[sender.tag].0)
     }
     func chooseAction(_ action: String) {
         guard !busy, actions.contains(where: { $0.0 == action }) else { return }
+        shortcutProbeArmed = false
         current = action
         UserDefaults.standard.set(action, forKey: "action")
         makeMenu()
@@ -326,6 +357,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func setShortcut(_ sender: NSMenuItem) {
         guard shortcutLabels.indices.contains(sender.tag) else { return }
+        if shortcutProbeArmed {
+            shortcutProbeArmed = false
+            setStatus("快捷键已更改，测试已取消。")
+        }
         UserDefaults.standard.set(sender.tag, forKey: "shortcut"); makeMenu(); registerShortcut()
     }
     @objc func setLanguage(_ sender: NSMenuItem) {
@@ -411,7 +446,9 @@ if CommandLine.arguments.contains("--self-test-shortcut-status") {
     guard state.reportHandlerInstallation(noErr, installed: true) else { fail("valid handler rejected") }
     state.reportShortcutRegistration(noErr, registered: true)
     guard state.shortcutError == nil, state.displayedStatus == "正在处理：截图转文字" else { fail("handler recovery did not preserve in-progress status") }
-    emit(["ok": true, "checks": ["registration failure and recovery", "model error preserved", "in-progress status preserved", "handler failure and recovery"], "uses_general_clipboard": false]); exit(0)
+    state.toggleShortcutProbe(nil)
+    guard !state.shortcutProbeArmed, state.statusMessage.contains("未成功注册") else { fail("probe accepted unregistered shortcut") }
+    emit(["ok": true, "checks": ["registration failure and recovery", "model error preserved", "in-progress status preserved", "handler failure and recovery", "unregistered shortcut probe rejected"], "uses_general_clipboard": false]); exit(0)
 }
 
 let application = NSApplication.shared
@@ -422,17 +459,36 @@ if CommandLine.arguments.contains("--self-test-hotkey") {
     guard delegate.hotkey != nil, delegate.handler != nil else { fail("Hotkey registration failed") }
     let menu = delegate.item.menu!
     guard menu.items.filter({ $0.representedObject is String }).count == 5 else { fail("Action menu missing entries") }
+    delegate.makePanel() // Builds controls without showing a window or reading the pasteboard.
+    guard let probe = delegate.shortcutProbeButton, let content = delegate.panel?.contentView,
+          probe.title.contains("测试快捷键") else { fail("Shortcut probe button missing") }
+    content.layoutSubtreeIfNeeded()
+    let probeFrame = probe.convert(probe.bounds, to: content)
+    guard probeFrame.width > 0, probeFrame.height > 0,
+          probeFrame.minX >= content.bounds.minX, probeFrame.maxX <= content.bounds.maxX,
+          probeFrame.minY >= content.bounds.minY, probeFrame.maxY <= content.bounds.maxY
+    else { fail("Shortcut probe is outside the panel: \(probeFrame) / \(content.bounds)") }
     var event: EventRef?
     guard CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), GetCurrentEventTime(), EventAttributes(0), &event) == noErr,
           let event else { fail("Cannot create internal hotkey event") }
     var identifier = EventHotKeyID(signature: 0x4D43504D, id: 1)
     SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), MemoryLayout<EventHotKeyID>.size, &identifier)
+    probe.performClick(nil)
+    guard delegate.shortcutProbeArmed, probe.title == "取消快捷键测试" else { fail("Cannot arm shortcut probe") }
     guard SendEventToEventTarget(event, GetApplicationEventTarget()) == noErr else { fail("Cannot dispatch internal hotkey event") }
+    let probeDeadline = Date().addingTimeInterval(1)
+    while delegate.shortcutProbeArmed && Date() < probeDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    guard !delegate.shortcutProbeArmed, delegate.hotkeyTriggers == 0,
+          delegate.statusMessage.contains("已收到快捷键"), probe.title.contains("测试快捷键") else { fail("Shortcut probe did not consume the event") }
+    probe.performClick(nil)
+    probe.performClick(nil)
+    guard !delegate.shortcutProbeArmed, delegate.statusMessage.contains("已取消") else { fail("Shortcut probe did not cancel") }
+    guard SendEventToEventTarget(event, GetApplicationEventTarget()) == noErr else { fail("Cannot dispatch second internal hotkey event") }
     let deadline = Date().addingTimeInterval(1)
     while delegate.hotkeyTriggers == 0 && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
     guard delegate.hotkeyTriggers == 1 else { fail("Hotkey handler did not run") }
-    emit(["ok": true, "checks": ["five menu actions", "Carbon registration", "internal hotkey event dispatch"], "physical_keystroke_tested": false, "uses_general_clipboard": false])
+    emit(["ok": true, "checks": ["five menu actions", "Carbon registration", "probe inside panel", "probe consumes event", "probe cancellation", "internal hotkey event dispatch"], "physical_keystroke_tested": false, "uses_general_clipboard": false])
     exit(0)
 }
 application.run()

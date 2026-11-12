@@ -1,5 +1,6 @@
 import argparse
 import sys
+from urllib.parse import urlsplit
 
 from .common import ToolError
 
@@ -25,6 +26,15 @@ def main():
         return 130
 
 
+def _doctor_address(url):
+    """Show the local origin while hiding custom paths that may contain secrets."""
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    if parts.path in {"", "/", "/v1"}:
+        return origin + parts.path
+    return origin + "/[路径已隐藏]"
+
+
 def run_doctor(args):
     from .client import LocalClient
 
@@ -44,7 +54,7 @@ def run_doctor(args):
                 raise ToolError("本地服务的模型列表格式无效；请检查服务地址和 API 兼容性。")
             names = [row["id"] for row in rows]
             present = model in names or any(n == model + ":latest" for n in names)
-            print(f"{label}: {url} · {model} · {'可见' if present else '服务可达，模型名称未匹配'}")
+            print(f"{label}: {_doctor_address(url)} · {model} · {'可见' if present else '服务可达，模型名称未匹配'}")
             failed |= not present
         except ToolError as exc:
             print(f"{label}: {exc}")

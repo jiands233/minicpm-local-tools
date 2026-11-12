@@ -28,7 +28,7 @@ uv sync --extra audio
   --output-dir ./local-output/audio
 ```
 
-每次输出到一个新的 `YYYY-MM-DD-audio-<随机后缀>` 子目录，生成 `transcript.txt`、`transcript.json`、`summary.md`（未启用摘要时没有最后一项）。已有文件不会被覆盖。目录默认以当前用户私有权限创建。若摘要服务失败，转写会保留，终端返回失败并打印重试指令。
+每次输出到一个新的 `YYYY-MM-DD-audio-<随机后缀>` 子目录，生成 `transcript.txt`、`transcript.json`、`summary.md`（未启用摘要时没有最后一项）。已有文件不会被覆盖。目录默认以当前用户私有权限创建。若摘要服务失败，转写会保留，终端返回失败并打印重试指令；该指令使用当前 Python 解释器及原 `--chunk-chars` 设置，即使没有激活虚拟环境也可使用，重试会另建输出目录。
 
 ## 重用转写与可复现示例
 

@@ -4,6 +4,8 @@ import json
 import os
 import runpy
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -108,6 +110,52 @@ def test_keyword_mode_requires_no_model_calls(corpus):
     assert client.batches == []
     with pytest.raises(ToolError, match="只有关键词"):
         search_index(index, "biology", client=client, mode="semantic")
+
+
+def test_keyword_no_ocr_cli_works_with_broken_model_configuration(corpus):
+    root, index = corpus
+    env = os.environ | {
+        "MINICPM_BASE_URL": "https://example.invalid/v1/private-token",
+        "MINICPM_TIMEOUT": "not-a-number",
+    }
+
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, "-m", "minicpm_tools", "search", *map(str, args)],
+            env=env, capture_output=True, text=True, check=False,
+        )
+
+    built = run("index", root, "--index", index, "--mode", "keyword", "--no-ocr")
+    assert built.returncode == 0, built.stderr
+    assert json.loads(built.stdout)["mode"] == "keyword"
+    found = run("query", "biology", "--index", index, "--json")
+    assert found.returncode == 0, found.stderr
+    assert Path(json.loads(found.stdout)[0]["path"]).name == "marine.md"
+    updated = run("index", root, "--index", index, "--mode", "keyword", "--no-ocr",
+                  "--replace", "--incremental")
+    assert updated.returncode == 0, updated.stderr
+    assert json.loads(updated.stdout)["reused_files"] == 2
+
+    # A semantic index is also searchable as plain keywords without a service.
+    semantic_index = index.parent / "semantic.sqlite"
+    index_folder(root, semantic_index, client=FakeClient())
+    keyword_query = run("query", "biology", "--index", semantic_index, "--mode", "keyword", "--json")
+    assert keyword_query.returncode == 0, keyword_query.stderr
+    assert Path(json.loads(keyword_query.stdout)[0]["path"]).name == "marine.md"
+    semantic_query = run("query", "biology", "--index", semantic_index, "--mode", "semantic")
+    assert semantic_query.returncode != 0 and "模型地址无效" in semantic_query.stderr
+
+    # Paths that can call a model still validate the invalid config first.
+    for options in (("--rewrite",), ("--explain",)):
+        rejected = run("query", "biology", "--index", index, *options)
+        assert rejected.returncode != 0
+        assert "模型地址无效" in rejected.stderr
+        assert "private-token" not in rejected.stderr
+    for extra in (("--mode", "semantic", "--no-ocr"), ("--mode", "keyword")):
+        rejected = run("index", root, "--index", index.parent / "other.sqlite", *extra)
+        assert rejected.returncode != 0
+        assert "模型地址无效" in rejected.stderr
+        assert "private-token" not in rejected.stderr
 
 
 def test_keyword_search_finds_single_chinese_character_inside_words(tmp_path):

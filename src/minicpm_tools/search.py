@@ -248,7 +248,10 @@ def index_folder(
     existing_identity = (
         _existing_index_identity(index, root) if replace and index.exists() else None
     )
-    client = client or LocalClient.from_env()
+    # A keyword-only build with OCR disabled never needs a model. Do not let an
+    # unrelated invalid model address prevent this offline recovery path.
+    if client is None and (mode == "semantic" or ocr):
+        client = LocalClient.from_env()
     settings = {
         "extraction_revision": EXTRACTION_REVISION,
         "mode": mode,
@@ -470,7 +473,6 @@ def search_index(
     index = index.expanduser().resolve()
     if not index.is_file():
         raise ToolError(f"索引不存在：{_terminal_text(index)}")
-    client = client or LocalClient.from_env()
     try:
         with sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True) as db:
             metadata = {
@@ -487,6 +489,9 @@ def search_index(
         raise ToolError("查询模式必须是 semantic、hybrid 或 keyword。")
     if mode != "keyword" and metadata["mode"] != "semantic":
         raise ToolError("此索引只有关键词；请用 --mode semantic 重建后再做语义搜索。")
+    # Plain keyword lookups do not call a model, even on a semantic index.
+    if client is None and (mode != "keyword" or rewrite or explain):
+        client = LocalClient.from_env()
     if rewrite:
         rewritten = client.chat(
             query,
