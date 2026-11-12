@@ -23,6 +23,26 @@ from .common import ToolError
 
 INDEX_APPLICATION_ID = 0x4D43504D
 EXTRACTION_REVISION = 1
+_TERMINAL_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+_JSON_TERMINAL_CONTROLS = re.compile(r"[\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def _terminal_text(value, *, allow_layout=False):
+    """Make untrusted file names and excerpts safe to inspect in a terminal."""
+    return _TERMINAL_CONTROLS.sub(
+        lambda match: (
+            match.group() if allow_layout and match.group() in "\n\t"
+            else ascii(match.group())[1:-1]
+        ),
+        str(value),
+    )
+
+
+def _terminal_json(value):
+    # json.dumps already escapes C0 controls. Escape C1 and bidi controls too,
+    # so displaying JSON is safe while parsing it recovers the original data.
+    encoded = json.dumps(value, ensure_ascii=False, indent=2)
+    return _JSON_TERMINAL_CONTROLS.sub(lambda m: f"\\u{ord(m.group()):04x}", encoded)
 
 
 def _file_identity(st):
@@ -212,7 +232,7 @@ def index_folder(
     index = index.expanduser().absolute()
     progress = progress or (lambda message: print(message, file=sys.stderr))
     if not root.is_dir():
-        raise ToolError(f"资料目录不存在：{root}")
+        raise ToolError(f"资料目录不存在：{_terminal_text(root)}")
     if root == Path(root.anchor) or root == Path.home():
         raise ToolError("请选择具体资料文件夹，不允许直接索引磁盘根目录或家目录。")
     if max_pages < 1 or max_pages > 500:
@@ -282,7 +302,7 @@ def index_folder(
             # Aborting avoids publishing a silently incomplete replacement index.
             location = exc.filename or str(root)
             raise ToolError(
-                f"无法读取资料目录：{location}；请检查访问权限，原索引未修改。"
+                f"无法读取资料目录：{_terminal_text(location)}；请检查访问权限，原索引未修改。"
             ) from exc
 
         for directory, dirs, names in os.walk(root, followlinks=False, onerror=handle_walk_error):
@@ -304,7 +324,7 @@ def index_folder(
                     continue
                 before = path.stat()
                 if before.st_size > 100 * 1024 * 1024:
-                    raise ToolError(f"文件超过 100 MiB 限制：{path.name}")
+                    raise ToolError(f"文件超过 100 MiB 限制：{_terminal_text(path.name)}")
                 saved = previous_fingerprints.get(str(resolved))
                 reusable = (
                     can_reuse and isinstance(saved, list) and len(saved) == 5
@@ -312,7 +332,7 @@ def index_folder(
                     and saved == list(_file_identity(before))
                 )
                 if reusable:
-                    progress(f"复用 {path.relative_to(root)}")
+                    progress(f"复用 {_terminal_text(path.relative_to(root))}")
                     ocr_pages = set()
                     previous = db.execute(
                         "SELECT c.page,c.body,c.source,c.vector FROM previous_chunks p "
@@ -342,19 +362,19 @@ def index_folder(
                             ocr_pages.add(page)
                     scanned_pages += len(ocr_pages)
                     if path.is_symlink() or _file_identity(path.stat()) != _file_identity(before):
-                        raise ToolError(f"资料在索引期间发生变化：{path.name}；请重试，原索引未修改。")
+                        raise ToolError(f"资料在索引期间发生变化：{_terminal_text(path.name)}；请重试，原索引未修改。")
                     fingerprints[str(resolved)] = list(_file_identity(before))
                     files += 1
                     reused_files += 1
                     continue
-                progress(f"索引 {path.relative_to(root)}")
+                progress(f"索引 {_terminal_text(path.relative_to(root))}")
                 if path.suffix.lower() == ".pdf":
                     pages = _pdf_pages(path, max_pages, client, ocr, progress)
                 else:
                     try:
                         text = path.read_text(encoding="utf-8-sig")
                     except UnicodeError as exc:
-                        raise ToolError(f"文本必须为 UTF-8：{path.name}") from exc
+                        raise ToolError(f"文本必须为 UTF-8：{_terminal_text(path.name)}") from exc
                     pages = [(None, text, "text")]
                 for page, body, source in pages:
                     if source == "ocr":
@@ -380,7 +400,7 @@ def index_folder(
                             rows += 1
                 # Refuse to publish excerpts assembled while the source changed.
                 if path.is_symlink() or _file_identity(path.stat()) != _file_identity(before):
-                    raise ToolError(f"资料在索引期间发生变化：{path.name}；请重试，原索引未修改。")
+                    raise ToolError(f"资料在索引期间发生变化：{_terminal_text(path.name)}；请重试，原索引未修改。")
                 fingerprints[str(resolved)] = list(_file_identity(before))
                 files += 1
         if not rows:
@@ -394,7 +414,7 @@ def index_folder(
                         or list(_file_identity(source.stat())) != fingerprint):
                     raise OSError("source changed")
             except OSError as exc:
-                raise ToolError(f"资料在索引期间发生变化：{source.name}；请重试，原索引未修改。") from exc
+                raise ToolError(f"资料在索引期间发生变化：{_terminal_text(source.name)}；请重试，原索引未修改。") from exc
         metadata = {
             "version": 1,
             "root": str(root),
@@ -424,9 +444,11 @@ def index_folder(
             temporary.unlink()
         return metadata
     except Exception as exc:
-        if isinstance(exc, (ToolError, FileExistsError)):
+        if isinstance(exc, ToolError):
             raise
-        raise ToolError(f"索引失败（原索引保留）：{exc}") from exc
+        if isinstance(exc, FileExistsError):
+            raise FileExistsError("索引目标在构建期间出现，拒绝覆盖；现有文件未修改。") from exc
+        raise ToolError(f"索引失败（原索引保留）：{_terminal_text(exc)}") from exc
     finally:
         db.close()
         temporary.unlink(missing_ok=True)
@@ -447,7 +469,7 @@ def search_index(
         raise ToolError("--top-k 必须在 1 到 50 之间。")
     index = index.expanduser().resolve()
     if not index.is_file():
-        raise ToolError(f"索引不存在：{index}")
+        raise ToolError(f"索引不存在：{_terminal_text(index)}")
     client = client or LocalClient.from_env()
     try:
         with sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True) as db:
@@ -619,35 +641,41 @@ def search_index(
 
 
 def _index_command(args):
-    result = index_folder(
-        args.root,
-        args.index,
-        mode=args.mode,
-        max_pages=args.max_pages,
-        ocr=not args.no_ocr,
-        replace=args.replace,
-        incremental=args.incremental,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    try:
+        result = index_folder(
+            args.root,
+            args.index,
+            mode=args.mode,
+            max_pages=args.max_pages,
+            ocr=not args.no_ocr,
+            replace=args.replace,
+            incremental=args.incremental,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise ToolError(f"无法创建索引：{_terminal_text(exc)}") from exc
+    print(_terminal_json(result))
     return 0
 
 
 def _query_command(args):
-    hits = search_index(
-        args.index,
-        args.query,
-        mode=args.mode,
-        top_k=args.top_k,
-        rewrite=args.rewrite,
-        explain=args.explain,
-    )
+    try:
+        hits = search_index(
+            args.index,
+            args.query,
+            mode=args.mode,
+            top_k=args.top_k,
+            rewrite=args.rewrite,
+            explain=args.explain,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise ToolError(f"无法查询索引：{_terminal_text(exc)}") from exc
     if args.json:
-        print(json.dumps([asdict(hit) for hit in hits], ensure_ascii=False, indent=2))
+        print(_terminal_json([asdict(hit) for hit in hits]))
     elif not hits:
         print("没有匹配的现存文件。")
     else:
         for n, hit in enumerate(hits, 1):
-            print(f"\n{n}. {hit.path}" + (f" · 第 {hit.page} 页" if hit.page else ""))
+            print(f"\n{n}. {_terminal_text(hit.path)}" + (f" · 第 {_terminal_text(hit.page)} 页" if hit.page else ""))
             status = (
                 "来源已变化，摘录可能过期，请重建索引"
                 if hit.source_changed
@@ -655,16 +683,19 @@ def _query_command(args):
                 if hit.source_changed is None
                 else "未检测到来源变化"
             )
-            print(f"   score={hit.score:.3f} · {hit.source} · {status}")
-            print(hit.excerpt)
+            print(f"   score={hit.score:.3f} · {_terminal_text(hit.source)} · {status}")
+            print(_terminal_text(hit.excerpt, allow_layout=True))
             if hit.reason:
-                print(f"模型解释（需核对）：{hit.reason}")
+                print(f"模型解释（需核对）：{_terminal_text(hit.reason, allow_layout=True)}")
     if args.open is not None:
         if not 1 <= args.open <= len(hits):
             raise ToolError("--open 序号超出结果范围。")
         if sys.platform != "darwin":
             raise ToolError("自动打开文件目前只支持 macOS；请使用返回的绝对路径。")
-        subprocess.run(["/usr/bin/open", hits[args.open - 1].path], check=True)
+        try:
+            subprocess.run(["/usr/bin/open", hits[args.open - 1].path], check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ToolError(f"无法打开结果：{_terminal_text(exc)}") from exc
     return 0
 
 

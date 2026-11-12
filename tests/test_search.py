@@ -850,3 +850,80 @@ def test_incremental_rejects_index_changed_during_reuse(corpus, tmp_path):
     assert index.read_bytes() == b"concurrently created user file"
     assert other_path.read_bytes() == original
     assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_terminal_query_escapes_controls_without_changing_json_or_open_path(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from minicpm_tools import search
+
+    path = "/tmp/report\x1b\x9b\u202e.txt"
+    excerpt = "report\nnext\ttext\x1b\x9b\u202e"
+    reason = "evidence\x1b\x9b\u202e"
+    hit = search.Hit(path, None, excerpt, 1.0, "text", reason=reason, source_changed=False)
+    monkeypatch.setattr(search, "search_index", lambda *args, **kwargs: [hit])
+    monkeypatch.setattr(search.sys, "platform", "darwin")
+    opened = []
+    monkeypatch.setattr(search.subprocess, "run", lambda argv, **kwargs: opened.append(argv))
+    args = SimpleNamespace(index=Path("dummy"), query="report", mode=None, top_k=5,
+                           rewrite=False, explain=False, json=False, open=1)
+    search._query_command(args)
+    output = capsys.readouterr().out
+    assert all(char not in output for char in ("\x1b", "\x9b", "\u202e"))
+    assert r"\x1b" in output and r"\x9b" in output and r"\u202e" in output
+    assert "report\nnext\ttext" in output
+    assert opened == [["/usr/bin/open", path]]
+
+    args.json, args.open = True, None
+    search._query_command(args)
+    output = capsys.readouterr().out
+    assert all(char not in output for char in ("\x1b", "\x9b", "\u202e"))
+    decoded = json.loads(output)[0]
+    assert (decoded["path"], decoded["excerpt"], decoded["reason"]) == (path, excerpt, reason)
+
+
+def test_index_progress_and_missing_path_errors_escape_terminal_controls(tmp_path, capsys):
+    from minicpm_tools.search import _terminal_json
+
+    root = tmp_path / "docs\x1b\x9b\u202e"
+    root.mkdir()
+    (root / "name\x1b\x9b\u202e.txt").write_text("report", encoding="utf-8")
+    result = index_folder(root, tmp_path / "index.sqlite", mode="keyword", client=FakeClient())
+    output = capsys.readouterr().err
+    assert all(char not in output for char in ("\x1b", "\x9b", "\u202e"))
+    assert r"\x1b" in output and r"\x9b" in output and r"\u202e" in output
+    metadata = _terminal_json(result)
+    assert all(char not in metadata for char in ("\x1b", "\x9b", "\u202e"))
+    assert json.loads(metadata)["root"] == str(root)
+    with pytest.raises(ToolError) as error:
+        search_index(tmp_path / "missing\x1b\x9b\u202e.sqlite", "report", mode="keyword", client=FakeClient())
+    assert all(char not in str(error.value) for char in ("\x1b", "\x9b", "\u202e"))
+
+
+def test_cli_sanitizes_operating_system_errors(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from minicpm_tools import search
+
+    def fail(*args, **kwargs):
+        raise OSError("path\x1b\x9b\u202e")
+
+    args = SimpleNamespace(root=Path("root"), index=Path("index"), mode="keyword", max_pages=20,
+                           no_ocr=True, replace=False, incremental=False, query="word", top_k=5,
+                           rewrite=False, explain=False, json=False, open=None)
+    monkeypatch.setattr(search, "index_folder", fail)
+    monkeypatch.setattr(search, "search_index", fail)
+    for run in (search._index_command, search._query_command):
+        with pytest.raises(ToolError) as error:
+            run(args)
+        assert all(c not in str(error.value) for c in ("\x1b", "\x9b", "\u202e"))
+        assert r"\x1b" in str(error.value)
+    hit = search.Hit("/tmp/a\x1b.txt", None, "word", 1.0, "text")
+    monkeypatch.setattr(search, "search_index", lambda *args, **kwargs: [hit])
+    monkeypatch.setattr(search.sys, "platform", "darwin")
+    monkeypatch.setattr(search.subprocess, "run", fail)
+    args.open = 1
+    with pytest.raises(ToolError) as error:
+        search._query_command(args)
+    assert all(c not in str(error.value) for c in ("\x1b", "\x9b", "\u202e"))
+    assert "\x1b" not in capsys.readouterr().out

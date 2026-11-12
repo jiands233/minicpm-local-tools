@@ -207,6 +207,17 @@ done
 )
 ```
 
+#### 同一段中文朗读的模型对照
+
+在同一台 Apple Silicon Mac 上，对上述同一段 45 秒音频分别以 tiny 和 large-v3-turbo 各运行一次，均使用 `--language zh --no-summary`，不分段，也未生成摘要；以[作品原文](https://zh.wikisource.org/zh-hans/鸭的喜剧)为文字参照，并未逐字听审录音。两次都成功并将时间戳限制在音频时长以内。
+
+| 本地模型 | 单次 CLI 墙钟时间 | 转写观察 |
+| --- | ---: | --- |
+| tiny | 3.216 秒 | 将“俄国的盲诗人”误为“而国的忙时任”，将“寂寞”误为“激摸”；古文短语亦有明显错字。 |
+| large-v3-turbo | 3.109 秒 | 正确识别上述“俄国的盲诗人”和“寂寞”，但将“六弦琴”误为“六贤情”、“芝兰”误为“知澜”；约 27.3–45 秒被合为一条缺少标点的片段。 |
+
+这是一段单人文学朗读，两次时间各只测一次，可能受缓存和机器负载影响，不能据此比较模型性能或推断真实会议、长音频和中文整体准确率；两种模型都仍需人工核对。原始转写与运行记录保存在本机忽略目录 `.local/validation/human-speech/zh-model-comparison.1ceyodal/`，不改变 tiny 的默认配置。该可选 turbo 权重的来源与校验见下方模型对照。
+
 ### 真实英语人声小样本（2026-11-12）
 
 为补充合成语音测试，另用肯尼迪 1961 年就职演说的公开历史录音，截取音频 **40–60 秒**作单说话人英语样本。这是真实人声演讲，不是课程或会议录音。来源：[Wikimedia Commons 文件页](https://commons.wikimedia.org/wiki/File:JFK_inaugural_address.ogg)将此录音标为美国联邦政府作品及 Public Domain Mark 1.0，并列 John F. Kennedy Presidential Library & Museum 为来源；不同司法辖区的权利状况应另行核实。对照参考是[美国国家档案馆的演讲文本](https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address)。仓库不包含录音，下载的文件和输出均留在 `.local/`。
