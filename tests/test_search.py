@@ -158,6 +158,28 @@ def test_keyword_mode_requires_no_model_calls(corpus):
         search_index(index, "biology", client=client, mode="semantic")
 
 
+def test_keyword_and_hybrid_search_match_indexed_relative_directory(tmp_path):
+    root = tmp_path / "根标识"
+    body = "提交纸质报告的截止时间是12月12日，教室205。"
+    for name in ("天文课程", "书法课程"):
+        folder = root / name
+        folder.mkdir(parents=True)
+        (folder / "通知.txt").write_text(body, encoding="utf-8")
+    index = tmp_path / "index.sqlite"
+    client = FakeClient()
+    index_folder(root, index, client=client, ocr=False)
+
+    # The two bodies and filenames are identical, so their relative directory
+    # is the only way the keyword component can distinguish the topics.
+    for mode in ("keyword", "hybrid"):
+        hits = search_index(index, "天文课程报告截止时间", client=client, mode=mode)
+        assert [Path(hit.path).parent.name for hit in hits] == ["天文课程", "书法课程"]
+        assert hits[0].score > hits[1].score
+    assert [Path(hit.path).parent.name for hit in search_index(index, "天文", mode="keyword")] == ["天文课程"]
+    # Shared root and unrelated ancestors must not make every document match.
+    assert search_index(index, "根标识", mode="keyword") == []
+
+
 def test_query_closes_database_after_success_and_read_error(corpus, tmp_path, monkeypatch):
     root, index = corpus
     index_folder(root, index, mode="keyword", ocr=False)

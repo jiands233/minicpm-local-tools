@@ -246,6 +246,10 @@ done
 
 可用 `.venv/bin/python script/evaluate_audio_actions.py --output .local/action-eval.json` 对 56 条虚构中英文短句重跑本地模型分类诊断；输出文件必须不存在。结果含逐例标签和模型原始回答，失败批次单独标记且返回非零，不计入正确结果。这是小型手写诊断集，不是真实会议准确率基准。
 
+进一步尝试将每 8 条来源逐一分类并要求返回布尔值：56 条手写样本一次为 23 个命中、1 个漏报、1 个误报、31 个正确排除；中文朗读 66 条分句没有选出待办。但 AMI 会议的 277 条既有分句经 35 次请求后只选出 5 条，人工参考的三项分工全部漏掉，还误选电池讨论；并行负载下耗时约 142 秒。改用会议最后 21 条未经逗号拆分的原始转写片段后，识别出 Courtney 的分工，仍漏掉另外两项。实验表明切分会影响结果，但不能解释全部漏报；请求均成功也不等于分类正确，未将此方法用于默认流程。实验脚本、原始响应和记录位于 `.local/validation/action-next.dWg8NZZE/`。
+
+单独比较英文逗号切分：AMI 开头 120 秒的待办从 35 条降至 13 条，但会议最后 75 秒从 9 条降至 2 条，并漏掉了原本选中的 Courtney 分工；合并已完成事项和后续任务还可能触发现有过滤规则而丢失任务。测试改变了分块和模型上下文，只是单次子集对照；没有更改默认切分。
+
 ### 真实英语人声小样本（2026-11-12）
 
 为补充合成语音测试，另用肯尼迪 1961 年就职演说的公开历史录音，截取音频 **40–60 秒**作单说话人英语样本。这是真实人声演讲，不是课程或会议录音。来源：[Wikimedia Commons 文件页](https://commons.wikimedia.org/wiki/File:JFK_inaugural_address.ogg)将此录音标为美国联邦政府作品及 Public Domain Mark 1.0，并列 John F. Kennedy Presidential Library & Museum 为来源；不同司法辖区的权利状况应另行核实。对照参考是[美国国家档案馆的演讲文本](https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address)。仓库不包含录音，下载的文件和输出均留在 `.local/`。

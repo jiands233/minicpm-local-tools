@@ -605,7 +605,15 @@ def search_index(
             ):
                 raise ToolError("索引中的文件状态无效，请重建索引。")
             source_status[path] = None if saved is None else saved != current
-        searchable = body + " " + actual.name
+        # A folder name often carries the topic omitted by a generic filename
+        # (e.g. 课程/天文/通知.txt). Only include the path *within* the
+        # explicitly indexed root: the root's own name is shared by all files.
+        try:
+            relative_path = actual.resolve().relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            unavailable.add(path)
+            continue
+        searchable = body + " " + relative_path.as_posix()
         terms = Counter(tokens(searchable))
         for character in single_cjk:
             terms[character] = searchable.count(character)
