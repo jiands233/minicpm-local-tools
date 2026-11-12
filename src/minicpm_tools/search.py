@@ -93,6 +93,8 @@ class Hit:
     score: float
     source: str
     reason: str | None = None
+    # None means the index predates source fingerprints, not "unchanged".
+    source_changed: bool | None = None
 
 
 def tokens(text: str) -> list[str]:
@@ -218,6 +220,7 @@ def index_folder(
     os.close(fd)
     temporary = Path(temporary)
     files = rows = scanned_pages = 0
+    fingerprints = {}
     dimension = None
     db = sqlite3.connect(temporary)
     try:
@@ -225,11 +228,14 @@ def index_folder(
         CREATE TABLE chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, page INTEGER,
         body TEXT NOT NULL, source TEXT NOT NULL, vector TEXT);""")
         db.execute(f"PRAGMA application_id = {INDEX_APPLICATION_ID}")
+
         def handle_walk_error(exc: OSError) -> None:
             # os.walk silently skips inaccessible directories unless onerror is set.
             # Aborting avoids publishing a silently incomplete replacement index.
             location = exc.filename or str(root)
-            raise ToolError(f"无法读取资料目录：{location}；请检查访问权限，原索引未修改。") from exc
+            raise ToolError(
+                f"无法读取资料目录：{location}；请检查访问权限，原索引未修改。"
+            ) from exc
 
         for directory, dirs, names in os.walk(root, followlinks=False, onerror=handle_walk_error):
             dirs[:] = sorted(
@@ -248,7 +254,8 @@ def index_folder(
                     continue
                 if resolved == index.resolve():
                     continue
-                if path.stat().st_size > 100 * 1024 * 1024:
+                before = path.stat()
+                if before.st_size > 100 * 1024 * 1024:
                     raise ToolError(f"文件超过 100 MiB 限制：{path.name}")
                 progress(f"索引 {path.relative_to(root)}")
                 if path.suffix.lower() == ".pdf":
@@ -281,6 +288,10 @@ def index_folder(
                                 ),
                             )
                             rows += 1
+                # Refuse to publish excerpts assembled while the source changed.
+                if path.is_symlink() or _file_identity(path.stat()) != _file_identity(before):
+                    raise ToolError(f"资料在索引期间发生变化：{path.name}；请重试，原索引未修改。")
+                fingerprints[str(resolved)] = list(_file_identity(before))
                 files += 1
         if not rows:
             raise ToolError("未提取到可索引文本；检查文件类型、PDF 页数及 OCR 配置。")
@@ -297,6 +308,10 @@ def index_folder(
         }
         db.executemany(
             "INSERT INTO metadata VALUES(?,?)", [(k, json.dumps(v)) for k, v in metadata.items()]
+        )
+        # Keep the potentially large path map in the local index only, not CLI output.
+        db.execute(
+            "INSERT INTO metadata VALUES(?,?)", ("file_fingerprints", json.dumps(fingerprints))
         )
         db.commit()
         db.close()
@@ -373,11 +388,29 @@ def search_index(
         _vectors(vectors, 1, metadata["dimension"])
         qvector = vectors[0]
     root = Path(metadata["root"]).resolve()
+    fingerprints = metadata.get("file_fingerprints")
+    # Older v1 indexes have no source metadata. Report unknown instead of claiming fresh.
+    if fingerprints is not None and not isinstance(fingerprints, dict):
+        raise ToolError("索引中的文件状态无效，请重建索引。")
+    source_status = {}
     scored = []
     for path, page, body, source, vector in records:
         actual = Path(path)
         if actual.is_symlink() or not actual.is_file() or not actual.resolve().is_relative_to(root):
             continue
+        if path not in source_status:
+            saved = fingerprints.get(path) if fingerprints is not None else None
+            try:
+                current = list(_file_identity(actual.stat()))
+            except OSError:
+                continue
+            if saved is not None and (
+                not isinstance(saved, list)
+                or len(saved) != 5
+                or not all(type(value) is int for value in saved)
+            ):
+                raise ToolError("索引中的文件状态无效，请重建索引。")
+            source_status[path] = None if saved is None else saved != current
         terms = Counter(tokens(body + " " + actual.name))
         lexical = sum(min(count, terms[token]) for token, count in qtokens.items()) / max(
             1, sum(qtokens.values())
@@ -391,7 +424,16 @@ def search_index(
             _vectors([document_vector], 1, len(qvector))
             semantic = _cosine(qvector, document_vector)
             score = semantic if mode == "semantic" else 0.8 * semantic + 0.2 * lexical
-        scored.append(Hit(path, page, body, score, source))
+        scored.append(Hit(path, page, body, score, source, source_changed=source_status[path]))
+    # Warn even when no old excerpt matches: new contents are not indexed yet.
+    changed = sum(status is True for status in source_status.values())
+    unknown = sum(status is None for status in source_status.values())
+    if changed or unknown:
+        print(
+            f"索引状态：{changed} 个文件已变化，{unknown} 个文件状态未知；"
+            "搜索依据旧索引，请考虑使用 --replace 重建。",
+            file=sys.stderr,
+        )
     scored.sort(key=lambda hit: (-hit.score, hit.path, hit.page or 0))
     # Return distinct files/pages, keeping the strongest matching excerpt.
     hits = []
@@ -454,7 +496,14 @@ def _query_command(args):
     else:
         for n, hit in enumerate(hits, 1):
             print(f"\n{n}. {hit.path}" + (f" · 第 {hit.page} 页" if hit.page else ""))
-            print(f"   score={hit.score:.3f} · {hit.source}")
+            status = (
+                "来源已变化，摘录可能过期，请重建索引"
+                if hit.source_changed
+                else "来源状态未知，请考虑重建索引"
+                if hit.source_changed is None
+                else "未检测到来源变化"
+            )
+            print(f"   score={hit.score:.3f} · {hit.source} · {status}")
             print(hit.excerpt)
             if hit.reason:
                 print(f"模型解释（需核对）：{hit.reason}")

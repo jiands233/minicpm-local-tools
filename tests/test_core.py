@@ -307,3 +307,129 @@ def test_history_batch_rejects_oversized_single_title():
 
     with pytest.raises(ToolError, match="单条阅读记录过长"):
         list(history_batches([{"id": 1, "title": "测" * 1300}]))
+
+
+def test_history_splits_invalid_batches_and_keeps_validated_order():
+    import json
+
+    class PartialFailure:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, prompt, **kwargs):
+            ids = [int(line.split(" ", 1)[0]) for line in prompt.splitlines() if line[:1].isdigit()]
+            self.calls.append(ids)
+            if len(ids) > 2:
+                return json.dumps({"themes": [{"label": "坏编号", "ids": [999]}]})
+            return json.dumps({"themes": [{"label": "合成主题", "ids": ids}]})
+
+    client = PartialFailure()
+    rows = [{"id": i, "title": f"资料{i}"} for i in range(1, 5)]
+    assert summarize(rows, client) == [("合成主题", [1, 2]), ("合成主题", [3, 4])]
+    assert client.calls == [[1, 2, 3, 4], [1, 2], [3, 4]]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not json",
+        '{"themes":[{"label":"", "ids":[1]}]}',
+        '{"themes":[{"label":"test", "ids":[1,1]}]}',
+        '{"themes":[{"label":"test", "ids":[true]}]}',
+        '{"themes":[{"label":"test", "ids":[99]}]}',
+    ],
+)
+def test_history_single_record_invalid_result_never_fabricates(bad):
+    class BadClient:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, prompt, **kwargs):
+            self.calls += 1
+            return bad
+
+    client = BadClient()
+    with pytest.raises(ToolError, match="--mode list"):
+        summarize([{"id": 1, "title": "资料"}], client)
+    assert client.calls == 1
+
+
+def test_history_retry_budget_and_no_partial_output():
+    class AlwaysBad:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, prompt, **kwargs):
+            self.calls += 1
+            return '{"themes":[{"label":"错误", "ids":[999]}]}'
+
+    client = AlwaysBad()
+    with pytest.raises(ToolError, match="--mode list"):
+        summarize([{"id": i, "title": "标题"} for i in range(1, 61)], client)
+    assert client.calls <= 7  # one original + six additional, never exponential
+
+
+def test_history_http_error_is_not_retried():
+    class Offline:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, prompt, **kwargs):
+            self.calls += 1
+            raise ToolError("本地模型请求失败（HTTPStatusError）")
+
+    client = Offline()
+    with pytest.raises(ToolError, match="HTTPStatusError"):
+        summarize([{"id": 1, "title": "one"}, {"id": 2, "title": "two"}], client)
+    assert client.calls == 1
+
+
+def test_history_json_error_split_and_later_bad_single_fails():
+    import json
+
+    class BadSecond:
+        def chat(self, prompt, **kwargs):
+            ids = [int(line.split(" ", 1)[0]) for line in prompt.splitlines() if line[:1].isdigit()]
+            if len(ids) > 1:
+                return "bad json"
+            return json.dumps({"themes": [{"label": "good", "ids": [1]}]})
+
+    with pytest.raises(ToolError, match="--mode list"):
+        summarize([{"id": 1, "title": "one"}, {"id": 2, "title": "two"}], BadSecond())
+
+
+def test_history_does_not_retry_connection_error_after_split():
+    class OfflineAfterBad:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, prompt, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return "not json"
+            raise ToolError("本地模型请求失败（ConnectError）")
+
+    client = OfflineAfterBad()
+    with pytest.raises(ToolError, match="ConnectError"):
+        summarize([{"id": 1, "title": "one"}, {"id": 2, "title": "two"}], client)
+    assert client.calls == 2
+
+
+def test_history_budget_exhaustion_does_not_return_partial_data():
+    import json
+
+    class BadSecondHalf:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, prompt, **kwargs):
+            self.calls += 1
+            ids = [int(line.split(" ", 1)[0]) for line in prompt.splitlines() if line[:1].isdigit()]
+            if ids == [1, 2, 3, 4]:
+                return json.dumps({"themes": [{"label": "valid", "ids": ids}]})
+            return json.dumps({"themes": [{"label": "bad", "ids": [999]}]})
+
+    client = BadSecondHalf()
+    with pytest.raises(ToolError, match="--mode list"):
+        summarize([{"id": i, "title": "title"} for i in range(1, 9)], client)
+    assert client.calls <= 7

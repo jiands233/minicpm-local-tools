@@ -14,22 +14,27 @@ from .common import ToolError
 
 
 def local_url(url: str) -> str:
-    parts = urlsplit(url)
+    # Do not include the supplied URL in error messages: it can contain secrets.
+    invalid = "模型地址无效；只支持带合法端口的 localhost 或 loopback IP。"
     try:
+        parts = urlsplit(url)
+        # Accessing .port performs numeric/range validation; urlsplit itself does not.
+        port = parts.port
         local = (
             parts.hostname == "localhost" or ipaddress.ip_address(parts.hostname or "").is_loopback
         )
-    except ValueError:
-        local = False
+    except ValueError as exc:
+        raise ToolError(invalid) from exc
     if (
         not local
         or parts.scheme not in {"http", "https"}
-        or parts.username
-        or parts.password
+        or parts.username is not None
+        or parts.password is not None
         or parts.query
         or parts.fragment
+        or port == 0
     ):
-        raise ToolError("模型地址只允许 localhost 或 loopback IP，不接受远程服务或带凭据的 URL。")
+        raise ToolError(invalid)
     return url.rstrip("/")
 
 
@@ -51,7 +56,10 @@ class LocalClient:
         self.ocr_model = ocr_model
         self.embedding_url = local_url(embedding_url or base_url)
         self.embedding_model = embedding_model
-        self.timeout = float(timeout)
+        try:
+            self.timeout = float(timeout)
+        except (ValueError, TypeError) as exc:
+            raise ToolError("模型超时秒数必须为正数。") from exc
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ToolError("模型超时秒数必须为正数。")
 
@@ -80,7 +88,7 @@ class LocalClient:
                 )
                 response.raise_for_status()
                 return response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             # Server error bodies can echo sensitive inputs: don't print them.
             raise ToolError(
                 f"本地模型请求失败（{type(exc).__name__}）。检查服务、模型名称与超时设置。"

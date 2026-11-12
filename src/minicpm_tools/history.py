@@ -159,37 +159,69 @@ def history_batches(entries):
         yield batch
 
 
+class InvalidHistorySummary(ToolError):
+    """Model response fails the structure or complete-reference checks."""
+
+
+def _validate_summary(response, batch):
+    """Validate the entire response before releasing any group to the caller."""
+    allowed = {entry["id"] for entry in batch}
+    themes = response.get("themes")
+    if not isinstance(themes, list) or not 1 <= len(themes) <= 6:
+        raise InvalidHistorySummary("模型主题结构不合格。")
+    groups, used = [], []
+    for group in themes:
+        if (
+            not isinstance(group, dict)
+            or not isinstance(group.get("label"), str)
+            or not group["label"].strip()
+            or not isinstance(group.get("ids"), list)
+        ):
+            raise InvalidHistorySummary("模型主题结构不合格。")
+        ids = group["ids"]
+        if not ids or any(type(i) is not int or i not in allowed for i in ids):
+            raise InvalidHistorySummary("模型引用了不存在的页面。")
+        used.extend(ids)
+        groups.append((group["label"].strip()[:80], ids))
+    if set(used) != allowed or len(used) != len(set(used)):
+        raise InvalidHistorySummary("模型主题遗漏或重复了记录。")
+    return groups
+
+
+# Total additional calls, not recursion depth. Each split costs two calls.
+HISTORY_BATCH_RETRIES = 6
+
+
+def _summarize_batch(batch, client, remaining):
+    prompt = "\n".join(f"{e['id']} {e['title']}" for e in batch)
+    # Transport/HTTP/service errors must propagate immediately; only an actual
+    # returned but invalid model response is eligible for splitting.
+    raw = client.chat(
+        "请把下列记录分成最多6个主题。只返回JSON对象，themes是数组，每项label是主题名，"
+        "ids是对应编号数组。所有记录编号必须出现。\n" + prompt
+    )
+    try:
+        try:
+            response = parse_json(raw)
+        except ToolError as exc:
+            raise InvalidHistorySummary("模型未返回有效 JSON。") from exc
+        return _validate_summary(response, batch)
+    except InvalidHistorySummary as exc:
+        if len(batch) <= 1 or remaining[0] < 2:
+            raise ToolError(f"{exc} 已停止重试，请使用 --mode list 导出原始列表。") from exc
+        remaining[0] -= 2
+        mid = len(batch) // 2
+        # Evaluate both halves before returning; callers never receive partial groups.
+        return _summarize_batch(batch[:mid], client, remaining) + _summarize_batch(
+            batch[mid:], client, remaining
+        )
+
+
 def summarize(entries, client):
     """Model labels groups; all page URLs/text are rendered from original evidence."""
     groups = []
     for batch in history_batches(entries):
-        prompt = "\n".join(f"{e['id']} {e['title']}" for e in batch)
-        response = parse_json(
-            client.chat(
-                "请把下列记录分成最多6个主题。只返回JSON对象，themes是数组，每项label是主题名，"
-                "ids是对应编号数组。所有记录编号必须出现。\n" + prompt
-            )
-        )
-        allowed = {e["id"] for e in batch}
-        themes = response.get("themes")
-        if not isinstance(themes, list) or len(themes) > 6:
-            raise ToolError("模型主题结构不合格；请使用 --mode list 导出原始列表。")
-        used = []
-        for group in themes:
-            if (
-                not isinstance(group, dict)
-                or not isinstance(group.get("label"), str)
-                or not isinstance(group.get("ids"), list)
-            ):
-                raise ToolError("模型主题结构不合格。")
-            if not group["ids"] or any(
-                type(i) is not int or i not in allowed for i in group["ids"]
-            ):
-                raise ToolError("模型引用了不存在的页面，拒绝输出摘要。")
-            used.extend(group["ids"])
-            groups.append((group["label"][:80], list(dict.fromkeys(group["ids"]))))
-        if set(used) != allowed or len(used) != len(set(used)):
-            raise ToolError("模型主题遗漏或重复了记录；请重试或使用 --mode list。")
+        groups.extend(_summarize_batch(batch, client, [HISTORY_BATCH_RETRIES]))
     return groups
 
 

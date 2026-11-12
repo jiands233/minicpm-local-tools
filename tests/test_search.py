@@ -381,3 +381,93 @@ def test_unreadable_subdirectory_never_publishes_new_index(corpus):
         denied.chmod(0o700)
     assert not index.exists()
     assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_source_change_is_explicit_for_results_and_legacy_is_unknown(corpus):
+    root, index = corpus
+    target = root / "marine.md"
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    hit = search_index(index, "biology", client=FakeClient())[0]
+    assert hit.source_changed is False
+    target.write_text("This source was replaced with an unrelated passage.")
+    hit = search_index(index, "biology", client=FakeClient())[0]
+    assert hit.source_changed is True
+    assert "biology" in hit.excerpt  # Indexed excerpt, not current file contents.
+    with sqlite3.connect(index) as db:
+        db.execute("DELETE FROM metadata WHERE key = 'file_fingerprints'")
+        db.execute("PRAGMA application_id = 0")  # An existing v1 index.
+    assert search_index(index, "biology", client=FakeClient())[0].source_changed is None
+    # Legacy v1 files remain rebuildable without making claims about old data freshness.
+    index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert search_index(index, "unrelated", client=FakeClient())[0].source_changed is False
+    assert not search_index(index, "biology", client=FakeClient())
+
+
+def test_rebuild_rejects_file_modified_during_embedding_and_keeps_old_index(corpus):
+    root, index = corpus
+    original_client = FakeClient()
+    index_folder(root, index, client=original_client)
+    before = index.read_bytes()
+
+    class ChangingClient(FakeClient):
+        def embed(self, texts):
+            target = root / "algebra.txt"  # first path in sorted index traversal
+            target.write_text("file changed while embedding")
+            return super().embed(texts)
+
+    with pytest.raises(ToolError, match="索引期间发生变化"):
+        index_folder(root, index, client=ChangingClient(), replace=True)
+    assert index.read_bytes() == before
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_cli_json_and_human_output_expose_source_freshness(corpus, capsys):
+    import argparse
+
+    from minicpm_tools.search import _query_command
+
+    root, index = corpus
+    target = root / "marine.md"
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    target.write_text("changed file")
+    args = argparse.Namespace(
+        index=index,
+        query="biology",
+        mode="keyword",
+        top_k=5,
+        rewrite=False,
+        explain=False,
+        json=True,
+        open=None,
+    )
+    _query_command(args)
+    result = json.loads(capsys.readouterr().out)
+    assert result[0]["source_changed"] is True
+    args.json = False
+    _query_command(args)
+    assert "摘录可能过期" in capsys.readouterr().out
+
+
+def test_no_results_still_warn_when_source_changed(corpus, capsys):
+    import argparse
+
+    from minicpm_tools.search import _query_command
+
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    (root / "marine.md").write_text("Unique new marine content: starlight.")
+    args = argparse.Namespace(
+        index=index,
+        query="starlight",
+        mode="keyword",
+        top_k=5,
+        rewrite=False,
+        explain=False,
+        json=True,
+        open=None,
+    )
+    _query_command(args)
+    result = capsys.readouterr()
+    assert json.loads(result.out) == []
+    assert "1 个文件已变化" in result.err
+    assert "--replace" in result.err

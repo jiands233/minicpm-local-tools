@@ -23,3 +23,41 @@ def test_embedding_oversized_number_reports_invalid_vector(monkeypatch):
     )
     with pytest.raises(ToolError, match="无效向量"):
         client.embed(["x"])
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "http://localhost:notaport/v1",
+        "http://localhost:65536/v1",
+        "http://localhost:0/v1",
+        "http://[bad/v1",
+        "http://user:secret@localhost/v1",
+        "http://127.0.0.1/v1?token=secret",
+    ],
+)
+def test_bad_local_address_rejected_without_echoing_sensitive_text(address):
+    with pytest.raises(ToolError, match="模型地址无效") as exc:
+        LocalClient(base_url=address)
+    assert "secret" not in str(exc.value)
+    assert address not in str(exc.value)
+
+
+@pytest.mark.parametrize("timeout", ["bad", None, "nan", "-1", "0", "inf"])
+def test_invalid_timeout_is_actionable(timeout):
+    with pytest.raises(ToolError, match="模型超时秒数必须为正数"):
+        LocalClient(timeout=timeout)
+
+
+def test_httpx_invalid_url_fails_cleanly(monkeypatch):
+    import httpx
+
+    client = LocalClient()
+
+    def broken(*args, **kwargs):
+        raise httpx.InvalidURL("private URL details")
+
+    monkeypatch.setattr(httpx.Client, "get", broken)
+    with pytest.raises(ToolError) as exc:
+        client._request(client.base_url, "/models")
+    assert "private URL details" not in str(exc.value)
