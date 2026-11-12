@@ -145,7 +145,12 @@ def _bounded_segments(segments: list[Segment], duration: float, *, label: str | 
     warning_subject = f"第 {label} 段" if label else "音频"
     for segment in segments:
         if segment.start >= duration or segment.end > duration + 0.3 + 1e-9:
-            raise ToolError(f"{subject}返回超出音频范围的时间戳；未生成不完整转写。")
+            retry = (
+                "可去掉 --audio-chunk-seconds 和 --audio-silence-cut 后使用完整音频重试"
+                "（可能占用更多内存），或尝试其他分段长度；均不能保证成功，请核对结果。"
+                if label else ""
+            )
+            raise ToolError(f"{subject}返回超出音频范围的时间戳；未生成不完整转写。{retry}")
         end = segment.end
         if end > duration:
             print(f"{warning_subject}时间戳略超音频末尾，已截到实际末尾。", file=sys.stderr)

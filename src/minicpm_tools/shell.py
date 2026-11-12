@@ -93,6 +93,15 @@ WRITE_INTENT = re.compile(
     r"删除|清理|移动|重命名|改名|改为|替换|修改|写入|创建|执行|清空|remove|delete|rename|move|replace|write|create|execute",
     re.IGNORECASE,
 )
+# Descriptions of file history are common in read-only searches. Remove only
+# recognizable metadata phrases before testing for an additional write request.
+# This remains a heuristic; ambiguous phrasing can still be misclassified.
+READ_MODIFICATION = re.compile(
+    r"修改过(?=的|文件|文档|资料|记录|\s|[,，。.]|$)"
+    r"|修改的(?=文件|文档|资料|PDF|\s|$)"
+    r"|修改(?:时间|日期|记录|历史)",
+    re.IGNORECASE,
+)
 MUTATION = re.compile(
     r"(?<![\w.-])(?:sudo|rm|rmdir|mv|cp|chmod|chown|dd|mkfs|diskutil|truncate|touch|tee|sed|perl|python\d*|ruby|sh|bash|zsh|eval|exec)(?![\w.-])",
     re.IGNORECASE,
@@ -116,7 +125,7 @@ def suggestion_risks(command):
 
 
 def explicit_read_only_intent(intent):
-    return bool(READ_INTENT.search(intent) and not WRITE_INTENT.search(intent))
+    return bool(READ_INTENT.search(intent) and not WRITE_INTENT.search(READ_MODIFICATION.sub("", intent)))
 
 
 SUPPORTED_SHELLS = ("zsh", "bash", "fish", "sh", "ksh", "tcsh", "csh")

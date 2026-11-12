@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from minicpm_tools.common import ToolError
-from minicpm_tools.shell import generate, suggestion_risks
+from minicpm_tools.shell import explicit_read_only_intent, generate, suggestion_risks
 
 
 class Fake:
@@ -40,6 +40,37 @@ def test_plain_find_accepted_and_explicit_mutation_remains_previewable():
         "查找并重命名txt文件", Path("."), Fake("find . -name '*.txt' -exec mv {} {}.md \\\\;")
     )
     assert suggestion_risks(rename)
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "查找当前目录及子目录中最近一周修改过的 PDF 文件",
+        "列出上个月修改的文件",
+        "查看这个文件的修改时间",
+        "查询已修改过的文档",
+    ],
+)
+def test_read_only_file_history_rejects_write_suggestions(intent, tmp_path):
+    harmful = "find . -type f -name '*.pdf' -execdir sh -c 'mv a b' \\\\;"
+    with pytest.raises(ToolError, match="只读需求"):
+        generate(intent, tmp_path, Fake(harmful))
+    command, _ = generate(intent, tmp_path, Fake("find . -type f -name '*.pdf' -mtime -7"))
+    assert not suggestion_risks(command)
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "查找并修改这些 PDF",
+        "查找并修改最近修改过的 PDF 文件",
+        "查找并重命名上周修改的文件",
+        "查看文件并修改它的修改时间",
+        "查找并修改过期文件",
+    ],
+)
+def test_intent_with_real_write_action_is_not_treated_as_read_only(intent):
+    assert not explicit_read_only_intent(intent)
 
 
 def test_current_shell_is_inferred_from_parent_over_login_default(monkeypatch):

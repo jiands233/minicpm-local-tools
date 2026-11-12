@@ -1,0 +1,75 @@
+{
+  "description": "Fictional hand-labelled utterances for a small diagnostic, not recordings or a representative benchmark. A task is an explicit future obligation or commitment; status, hypothetical proposals and completed work are not tasks. These labels are editorial judgments and some phrasing can be ambiguous without wider context.",
+  "batches": [
+    {"name": "zh_commitments", "cases": [
+      {"text": "小王明天提交实验报告。", "task": true, "kind": "assignment", "owner": "小王"},
+      {"text": "请联系小李确认会议时间。", "task": true, "kind": "recipient", "owner": null},
+      {"text": "数据清洗昨天已经完成。", "task": false, "kind": "completed", "owner": null},
+      {"text": "负责人和截止时间还没有确定。", "task": false, "kind": "status", "owner": null},
+      {"text": "需要确定这项任务的负责人。", "task": true, "kind": "assignment", "owner": null},
+      {"text": "小赵周五负责检查报告。", "task": true, "kind": "assignment", "owner": "小赵"},
+      {"text": "小李昨天向小王发了报告。", "task": false, "kind": "completed", "owner": null},
+      {"text": "报告目前有三个章节。", "task": false, "kind": "narrative", "owner": null}
+    ]},
+    {"name": "en_commitments", "cases": [
+      {"text": "Alice will submit the report tomorrow.", "task": true, "kind": "assignment", "owner": "Alice"},
+      {"text": "Please send the draft to Bob tomorrow.", "task": true, "kind": "recipient", "owner": null},
+      {"text": "Carol completed the review yesterday.", "task": false, "kind": "completed", "owner": null},
+      {"text": "The owner has not been decided yet.", "task": false, "kind": "status", "owner": null},
+      {"text": "We need to choose an owner for the project.", "task": true, "kind": "assignment", "owner": null},
+      {"text": "David is responsible for checking the figures.", "task": true, "kind": "assignment", "owner": "David"},
+      {"text": "Alice sent Bob the report last week.", "task": false, "kind": "completed", "owner": null},
+      {"text": "The report contains three chapters.", "task": false, "kind": "narrative", "owner": null}
+    ]},
+    {"name": "negation_and_questions", "cases": [
+      {"text": "明天不要忘记发送报告。", "task": true, "kind": "negative_form_task", "owner": null},
+      {"text": "我们不必再提交旧版本。", "task": false, "kind": "no_obligation", "owner": null},
+      {"text": "小陈还需要补交实验数据。", "task": true, "kind": "assignment", "owner": "小陈"},
+      {"text": "是否需要增加一组对照实验？", "task": false, "kind": "question", "owner": null},
+      {"text": "Don't forget to send the report tomorrow.", "task": true, "kind": "negative_form_task", "owner": null},
+      {"text": "We don't need to submit the old version again.", "task": false, "kind": "no_obligation", "owner": null},
+      {"text": "Bob still needs to check the results.", "task": true, "kind": "assignment", "owner": "Bob"},
+      {"text": "Should we add another control group?", "task": false, "kind": "question", "owner": null}
+    ]},
+    {"name": "roles_and_contrasts", "cases": [
+      {"text": "小张安排小周明天检查数据。", "task": true, "kind": "assignment", "owner": "小周"},
+      {"text": "小张曾经安排小周检查数据。", "task": false, "kind": "past", "owner": null},
+      {"text": "请把报告发给小李。", "task": true, "kind": "recipient", "owner": null},
+      {"text": "小李说这份报告格式很好。", "task": false, "kind": "narrative", "owner": null},
+      {"text": "Alice asked Bob to review the draft tomorrow.", "task": true, "kind": "assignment", "owner": "Bob"},
+      {"text": "Alice asked Bob about the draft yesterday.", "task": false, "kind": "past", "owner": null},
+      {"text": "Please send Carol the draft.", "task": true, "kind": "recipient", "owner": null},
+      {"text": "Carol said the draft looked good.", "task": false, "kind": "narrative", "owner": null}
+    ]},
+    {"name": "future_context", "cases": [
+      {"text": "明天要整理好参考文献。", "task": true, "kind": "future_task", "owner": null},
+      {"text": "明天天气预计会转晴。", "task": false, "kind": "future_narrative", "owner": null},
+      {"text": "周一之前必须完成设备检查。", "task": true, "kind": "future_task", "owner": null},
+      {"text": "会议预计周一开始。", "task": false, "kind": "future_narrative", "owner": null},
+      {"text": "The team must review the figures by Monday.", "task": true, "kind": "future_task", "owner": "The team"},
+      {"text": "The weather will improve tomorrow.", "task": false, "kind": "future_narrative", "owner": null},
+      {"text": "Prepare the handout before the workshop.", "task": true, "kind": "future_task", "owner": null},
+      {"text": "The workshop will begin on Monday.", "task": false, "kind": "future_narrative", "owner": null}
+    ]},
+    {"name": "requests_as_questions", "cases": [
+      {"text": "请问能否在明天前发报告？", "task": true, "kind": "polite_request", "owner": null},
+      {"text": "麻烦周五检查一下数据可以吗？", "task": true, "kind": "polite_request", "owner": null},
+      {"text": "这份报告是哪一天提交的？", "task": false, "kind": "information_question", "owner": null},
+      {"text": "实验方案是否已经通过？", "task": false, "kind": "information_question", "owner": null},
+      {"text": "Could you send the report by tomorrow?", "task": true, "kind": "polite_request", "owner": null},
+      {"text": "Would you please check the data on Friday?", "task": true, "kind": "polite_request", "owner": null},
+      {"text": "When was the report submitted?", "task": false, "kind": "information_question", "owner": null},
+      {"text": "Has the experiment plan been approved?", "task": false, "kind": "information_question", "owner": null}
+    ]},
+    {"name": "narrative_only", "cases": [
+      {"text": "窗外的湖水映着远处的山。", "task": false, "kind": "narrative", "owner": null},
+      {"text": "他讲述了以前在学校读书的经历。", "task": false, "kind": "narrative", "owner": null},
+      {"text": "小鸟飞过屋顶又落在树上。", "task": false, "kind": "narrative", "owner": null},
+      {"text": "广播里传来一首古老的歌曲。", "task": false, "kind": "narrative", "owner": null},
+      {"text": "The river flowed past a small village.", "task": false, "kind": "narrative", "owner": null},
+      {"text": "A child watched the birds from the window.", "task": false, "kind": "narrative", "owner": null},
+      {"text": "The old book was lying on the table.", "task": false, "kind": "narrative", "owner": null},
+      {"text": "At sunset the sky turned orange.", "task": false, "kind": "narrative", "owner": null}
+    ]}
+  ]
+}

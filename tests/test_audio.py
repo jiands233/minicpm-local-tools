@@ -296,8 +296,12 @@ def test_chunked_rejects_timestamp_beyond_last_short_chunk(tmp_path, monkeypatch
         calls.append(len(samples))
         return {'segments': [{'start': 0, 'end': 1 if len(calls) == 1 else 1.31, 'text': 'text'}]}
     monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
-    with pytest.raises(ToolError, match='第 2/2 段返回超出音频范围'):
+    with pytest.raises(ToolError, match='第 2/2 段返回超出音频范围') as error:
         transcribe(source, model, audio_chunk_seconds=30)
+    assert '--audio-chunk-seconds' in str(error.value)
+    assert '--audio-silence-cut' in str(error.value)
+    assert '内存' in str(error.value)
+    assert '不能保证成功' in str(error.value)
 
 
 def test_chunked_clamps_only_small_end_overrun_and_warns(tmp_path, monkeypatch, capsys):
@@ -349,6 +353,19 @@ def test_timestamp_limit_is_consistent_for_unchunked_and_chunked(tmp_path, monke
     result['segments'][0].update(start=1.0, end=1.1)
     with pytest.raises(ToolError, match='超出音频范围'):
         transcribe(source, model, **options)
+
+
+def test_unchunked_timestamp_failure_does_not_suggest_removing_chunk_options(tmp_path, monkeypatch):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=1)
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=lambda *a, **k: {
+        'segments': [{'start': 0, 'end': 2, 'text': 'past audio'}],
+    }))
+    with pytest.raises(ToolError, match='超出音频范围') as error:
+        transcribe(source, model)
+    assert '--audio-chunk-seconds' not in str(error.value)
 
 
 def test_chunked_failure_cleans_decoded_temporary_file(tmp_path, monkeypatch):
