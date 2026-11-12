@@ -2,8 +2,10 @@
 
 import argparse
 import base64
+import subprocess
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from minicpm_tools import clipboard
@@ -132,6 +134,45 @@ class ClipboardTests(unittest.TestCase):
             ):
                 clipboard.run(args)
             bridge.assert_called_once_with("--snapshot-image")
+
+    def test_old_bridge_is_detected_without_snapshot_or_gui(self):
+        old_response = SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+        with (
+            patch.object(clipboard, "bridge_path", return_value=Path("/bridge")),
+            patch.object(clipboard.subprocess, "run", return_value=old_response) as run,
+            self.assertRaisesRegex(ToolError, "重新构建"),
+        ):
+            clipboard.bridge_call("--snapshot-text")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], [
+            "/bridge", "--bridge-version", "--self-test-timeouts", "--self-test"
+        ])
+
+    def test_bridge_probe_invalid_or_timeout_fails_before_read(self):
+        for outcome in (
+            SimpleNamespace(returncode=0, stdout="not json", stderr=""),
+            SimpleNamespace(returncode=1, stdout='{"bridge_version": 2}', stderr=""),
+            subprocess.TimeoutExpired("bridge", 5),
+        ):
+            with (
+                patch.object(clipboard, "bridge_path", return_value=Path("/bridge")),
+                patch.object(clipboard.subprocess, "run", side_effect=[outcome]) as run,
+                self.assertRaisesRegex(ToolError, "重新构建"),
+            ):
+                clipboard.bridge_call("--snapshot-text")
+            self.assertEqual(run.call_count, 1)
+
+    def test_compatible_bridge_snapshot_runs_after_probe(self):
+        responses = [
+            SimpleNamespace(returncode=0, stdout='{"bridge_version": 2}', stderr=""),
+            SimpleNamespace(returncode=0, stdout='{"change_count": 7, "text": "demo"}', stderr=""),
+        ]
+        with (
+            patch.object(clipboard, "bridge_path", return_value=Path("/bridge")),
+            patch.object(clipboard.subprocess, "run", side_effect=responses) as run,
+        ):
+            self.assertEqual(clipboard.bridge_call("--snapshot-text")["text"], "demo")
+        self.assertEqual(run.call_args.args[0], ["/bridge", "--snapshot-text"])
 
 
 if __name__ == "__main__":

@@ -35,6 +35,32 @@ def test_chunking_bounds_long_single_segment_and_stable_refs():
     assert ''.join(s.text for c in chunks for _, s in c) == 'a' * 1201 + 'b' * 20
 
 
+@pytest.mark.parametrize('phrase', [
+    '负责人和截止时间还没有确定。', '负责人尚未确定。', '截止日期还不确定。',
+    '负责人、截止时间未明确。',
+])
+def test_undecided_metadata_is_not_an_explicit_action(phrase):
+    source = Segment(0, 1, phrase)
+    items, rejected = grounded_items(
+        [{'segment_id': 's1', 'evidence': phrase}], {'s1': source}, action=True
+    )
+    assert items == []
+    assert rejected == 1
+
+
+@pytest.mark.parametrize('phrase', [
+    '需要确定负责人。', '明天确定截止时间。', '负责人还没有确定，明天需要完成报告。',
+    '负责人还没有确定是否提交报告。', '截止时间还没有确定，需要尽快讨论。',
+])
+def test_undecided_metadata_rule_does_not_drop_explicit_or_longer_phrases(phrase):
+    source = Segment(0, 1, phrase)
+    items, rejected = grounded_items(
+        [{'segment_id': 's1', 'evidence': phrase}], {'s1': source}, action=True
+    )
+    assert [item['text'] for item in items] == [phrase]
+    assert rejected == 0
+
+
 def test_actions_require_real_citation_and_owner_in_evidence():
     sources = {'s1': Segment(0, 4, '下周整理实验报告。')}
     result, rejected = grounded_items([

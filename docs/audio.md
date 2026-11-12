@@ -55,6 +55,8 @@ JSON 结构是 `{"segments":[{"start":0,"end":3.5,"text":"原文"}]}`，时间�
 
 2026-11-12：使用本地模型对手写的 `examples/audio-transcript.json` 再次生成纪要，格式检查通过，但模型把“负责人和截止时间还没有确定”误选为待办，也未识别“小王”作为另一条待办的负责人。这个样本并非真实录音，结果存于本机忽略目录 `.local/validation/audio-schema/`；引用有效不等于分类或字段正确。
 
+随后增加了范围很窄的检查：单独陈述负责人、人选或截止时间尚未确定的短句不当成明确待办；“需要确定负责人”这样的明确任务及包含其他内容的长句不受此规则过滤。相同手写夹具调用本机模型重测，该状态句不再列为行动项，两个原有任务仍保留；但负责人字段仍未识别“小王”，未决问题也仍有误分类。原文中出现名字不必然代表其为执行者，因此没有通过规则猜测负责人。此次输出在 `.local/validation/audio-undecided/`，只是单一合成文本样本，不能证明通用准确率。
+
 音频和转写可能很大，当前会在内存中解码整段音频；建议先用不超过十分钟的样本。所有输出只写入指定目录，不上传音频或转写，无云端回退。
 
 技术来源：[MLX Whisper 官方说明](https://github.com/ml-explore/mlx-examples/tree/main/whisper)、[MiniCPM 官方部署](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/ollama.md)。

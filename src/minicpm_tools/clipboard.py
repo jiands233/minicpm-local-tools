@@ -52,9 +52,26 @@ def bridge_path() -> Path:
 
 
 def bridge_call(*args: str, text: str | None = None) -> dict:
+    path = bridge_path()
+    outdated = "原生剪贴板桥接器版本不兼容；请运行 ./script/build_and_run.sh --build-only 重新构建。"
+    try:
+        # The fallback flags are recognized by older builds and run only private
+        # self-tests, rather than launching the UI or reading the real clipboard.
+        probe = subprocess.run(
+            [str(path), "--bridge-version", "--self-test-timeouts", "--self-test"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        version = json.loads(probe.stdout)
+        if probe.returncode or not isinstance(version, dict) or version.get("bridge_version") != 2:
+            raise ToolError(outdated)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ToolError(outdated) from exc
     try:
         result = subprocess.run(
-            [str(bridge_path()), *args],
+            [str(path), *args],
             input=text,
             text=True,
             capture_output=True,

@@ -192,6 +192,31 @@ def test_no_ocr_explicitly_skips_blank_pdf(corpus):
     assert any("--no-ocr" in message for message in messages)
 
 
+def test_empty_ocr_does_not_replace_existing_index(corpus):
+    pdfium = pytest.importorskip("pypdfium2")
+    pytest.importorskip("PIL")
+    root, index = corpus
+    index_folder(root, index, client=FakeClient(), mode="keyword")
+    before = index.read_bytes()
+    document = pdfium.PdfDocument.new()
+    page = document.new_page(200, 200)
+    page.close()
+    document.save(root / "notice.pdf")
+    document.close()
+
+    class EmptyOCR(FakeClient):
+        def ocr(self, image):
+            self.images.append(str(image))
+            return "  \n"
+
+    client = EmptyOCR()
+    with pytest.raises(ToolError, match="OCR.*空"):
+        index_folder(root, index, client=client, mode="keyword", replace=True)
+    assert index.read_bytes() == before
+    assert len(client.images) == 1 and not Path(client.images[0]).exists()
+    assert search_index(index, "biology", client=client)[0].path.endswith("marine.md")
+
+
 def test_no_ocr_preserves_short_text_layer_as_searchable_content(tmp_path):
     pytest.importorskip("pypdfium2")
     root = tmp_path / "docs"

@@ -175,6 +175,8 @@ def _pdf_pages(path: Path, max_pages: int, client, ocr: bool, progress: Callable
                             text = client.ocr(image)
                     finally:
                         bitmap.close()
+                    if not isinstance(text, str) or not text.strip():
+                        raise ToolError(f"第 {number + 1} 页 OCR 返回空文字或无效结果；原索引未修改。")
                     source = "ocr"
                 if text.strip():
                     yield number + 1, text, source

@@ -18,6 +18,11 @@ func watchdogSeconds(_ value: String?, action: String) -> Double? {
     guard total.isFinite, total < 9_000_000 else { return nil }
     return total
 }
+// Older bridges run their private self-test instead of starting the app when
+// they receive the accompanying fallback flags from the Python client.
+if CommandLine.arguments.contains("--bridge-version") {
+    emit(["bridge_version": 2]); exit(0)
+}
 if CommandLine.arguments.contains("--self-test-timeouts") {
     guard watchdogSeconds(nil, action: "ocr") == 240,
           watchdogSeconds("300", action: "ocr") == 360,

@@ -194,6 +194,17 @@ def require_model_lists(value: dict, fields: tuple[str, ...], chunk: int) -> Non
         )
 
 
+# A bare statement of missing assignment metadata is not an explicit task.
+# Full-match only: "需要确定负责人" or a longer clause containing an actual
+# commitment must remain available for the user to review.
+_UNDECIDED_METADATA = re.compile(
+    r"(?:负责人|截止时间|截止日期|时间|人选)"
+    r"(?:(?:和|与|及|、)(?:负责人|截止时间|截止日期|时间|人选))*"
+    r"(?:还|尚)?(?:没有|没|未|不)(?:有)?(?:确定|明确|定下|敲定)"
+    r"[。.!！]?"
+)
+
+
 def grounded_items(items: object, sources: dict[str, Segment], *, action=False) -> tuple[list[dict], int]:
     """Reject unknown citations; actions display source wording, never invented tasks."""
     if not isinstance(items, list):
@@ -209,6 +220,9 @@ def grounded_items(items: object, sources: dict[str, Segment], *, action=False) 
             rejected += 1
             continue
         evidence = evidence.strip()
+        if action and _UNDECIDED_METADATA.fullmatch(evidence):
+            rejected += 1
+            continue
         if action and re.match(r"^(是否|要不要|能否|可否|should\s+we|whether\b)", evidence, re.IGNORECASE):
             rejected += 1
             continue
