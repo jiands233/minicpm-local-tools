@@ -318,25 +318,14 @@ def audio(run, whisper_model):
 
 def history(run):
     path = run.directory / "synthetic-History.sqlite"
-    db = sqlite3.connect(path)
+    from minicpm_tools.reading_demo import create_history
+
+    titles = ["MiniCPM 官方部署指南", "本地向量搜索入门", "蓝鲸的生活习性", "登录账户"]
+    rows = [(title, "https://example.org/" + (
+        "login" if number == 4 else f"{number}?utm_source=fixture#x"
+    )) for number, title in enumerate(titles, 1)]
+    db = create_history(path, rows)
     try:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript(
-            "CREATE TABLE urls(id INTEGER, title TEXT, url TEXT); CREATE TABLE visits(url INTEGER, visit_time INTEGER);"
-        )
-        titles = ["MiniCPM 官方部署指南", "本地向量搜索入门", "蓝鲸的生活习性", "登录账户"]
-        start = dt.datetime(2026, 11, 12, tzinfo=dt.timezone(dt.timedelta(hours=8))).timestamp()
-        for number, title in enumerate(titles, 1):
-            url = "https://example.org/" + (
-                "login" if number == 4 else f"{number}?utm_source=fixture#x"
-            )
-            db.execute("INSERT INTO urls VALUES (?,?,?)", (number, title, url))
-            db.execute(
-                "INSERT INTO visits VALUES (?,?)",
-                (number, int((start + number * 3600 + 11644473600) * 1e6)),
-            )
-        db.execute("INSERT INTO visits VALUES (?,?)", (1, int((start + 3900 + 11644473600) * 1e6)))
-        db.commit()
         listing = run.cli(
             "history",
             "--database",

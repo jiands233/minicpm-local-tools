@@ -6,7 +6,7 @@ import pytest
 
 from minicpm_tools.client import LocalClient, local_url
 from minicpm_tools.common import ToolError, write_new
-from minicpm_tools.history import clean_url, read_history, summarize
+from minicpm_tools.history import clean_url, read_history, render, summarize
 from minicpm_tools.shell import confirm_execute, execution_argv, validate_command
 
 
@@ -101,6 +101,44 @@ def test_history_rejects_invented_references():
 
     with pytest.raises(ToolError):
         summarize([{"id": 1, "title": "AI", "domain": "example.com"}], Fake())
+
+
+def test_history_generic_titles_are_not_sent_to_model():
+    entries = [
+        {"id": i, "title": title, "domain": domain, "time": "12:00",
+         "url": f"https://{domain}/", "visits": 1}
+        for i, (title, domain) in enumerate([
+            ("首页", "a.example.com"), ("首页", "b.example.com"),
+            ("首页", "c.example.com"), ("Python 教程", "d.example.com"),
+            ("园艺指南", "e.example.com"), ("旅行计划", "f.example.com"),
+        ], 1)
+    ]
+
+    class Fake:
+        def chat(self, prompt):
+            assert "首页" not in prompt
+            assert all(domain not in prompt for domain in (
+                "a.example.com", "b.example.com", "c.example.com"
+            ))
+            return '{"themes":[{"label":"资料", "ids":[4,5,6]}]}'
+
+    groups = summarize(entries, Fake())
+    assert groups == [("资料", [4, 5, 6]), ("标题信息不足，未归类", [1, 2, 3])]
+    output = render(entries, "2026-11-12", "UTC", groups)
+    assert "标题信息不足，未归类" in output
+    assert all(entry["url"] in output for entry in entries)
+
+
+def test_history_all_insufficient_titles_need_no_client(monkeypatch):
+    def fail():
+        raise AssertionError("模型客户端不应被创建")
+
+    monkeypatch.setattr(LocalClient, "from_env", fail)
+    entries = [
+        {"id": i, "title": title, "domain": "example.com"}
+        for i, title in enumerate(["", " example.com ", " HOME ", "New   Tab", "Untitled"], 1)
+    ]
+    assert summarize(entries) == [("标题信息不足，未归类", [1, 2, 3, 4, 5])]
 
 
 @pytest.mark.parametrize(
@@ -496,7 +534,7 @@ def test_history_summary_gets_filtered_hostname_not_url_or_port(tmp_path):
             "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); "
             "CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
         )
-        db.execute("INSERT INTO urls VALUES(1,?,?)", ("首页", "https://example.org:8443/path?query=private"))
+        db.execute("INSERT INTO urls VALUES(1,?,?)", ("本地工具指南", "https://example.org:8443/path?query=private"))
         db.execute("INSERT INTO urls VALUES(2,?,?)", ("private", "https://user:password@example.org/path"))
         db.executemany("INSERT INTO visits VALUES(?,?)", [(1, timestamp), (2, timestamp)])
     entries = read_history(path, "chrome", day, "UTC")

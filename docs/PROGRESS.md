@@ -237,3 +237,36 @@
 - 尝试把来源按每 8 条逐一作布尔分类。单次 56 条虚构短句为 23 命中、1 漏报、1 误报、31 正确排除，中文朗读 66 条分句无误选；但 AMI 会议 277 条既有分句只选出 5 条，漏掉人工参考的三项分工，并误选讨论问题。35 次请求均成功，并行负载下约 142 秒；不是稳定性能测试。没有替换默认提取流程。
 - 对 AMI 会议末尾采用未按逗号拆分的转写片段，实验分类器找回 Courtney 的分工，仍漏掉另两项。另一组英文逗号合并对照虽减少碎句，却会漏掉原本选中的分工，并可能将已完成与未来任务合并。仅凭单次测试不足以安全改变默认分句；实验细节与路径见 `docs/audio.md`。
 - 368 项本地自动测试、Ruff 和 diff 检查通过；五项合成样本本地模型验收 `.local/acceptance/mvp-j39nhryp/report.json` 通过。真实会议待办质量问题仍未解决，实体快捷键、系统图片剪贴板、Safari 授权和整机物理断网仍待验收。
+
+## 2026-11-12 · M0：范围与项目介绍
+
+- 基于 `737e5b9` 和已有未提交改动，更新 README 首屏、`docs/history.md`、新增 `docs/ROADMAP.md`，将主线定位为本地阅读日报；其他工具继续保留。更新 `pyproject.toml` 描述，并把 numpy 加入 dev extra、离线更新 `uv.lock`，供 CI 安装音频测试所需依赖。CI 尚未运行，不能声称跳过数已改变。
+- README 量化信息来源：Python 与 CI 环境见 `pyproject.toml` 和 `.github/workflows/ci.yml`；推荐模型下载量见 `docs/models.md`，运行时大小见同文档安装信息；音频真实测试的限制见 `docs/audio.md`。命令中的数字为模型名或参数，不是效果指标。
+- 接手基线 `.venv/bin/pytest -q -ra`：374 通过、0 跳过；Ruff 和 `git diff --check` 通过。M0 与下述 M1 改动合并后重新验证：376 通过、0 跳过；`.venv/bin/ruff check src tests script`、`git diff --check` 和 `uv lock --check --offline` 通过。尚未提交。
+
+## 2026-11-12 · M1：标题信息不足的兜底（部分完成）
+
+- 空标题、与域名相同的标题和有限通用词表通过确定性规则归入“标题信息不足，未归类”，不进入模型；其余记录仍执行原有编号校验。合成测试覆盖三个不同站点的首页、空标题、域名和通用词、全部未归类时不创建客户端；词表不能识别所有含糊标题。
+- `script/verify_mvp.py --output-dir .local/acceptance --only history` 首次因默认端口模型服务未运行而失败，报告 `.local/acceptance/mvp-fl8li83k/report.json`；随后临时启动仅绑定 loopback、禁云的独立本地服务，使用同一命令及对应 `MINICPM_BASE_URL` 重试，合成历史验收通过，报告 `.local/acceptance/mvp-vig88eju/report.json`，服务已停止。两次都没有读取私人历史。
+- Chrome/Safari 真实历史、完全磁盘访问授权、整机断网及 Ollama 思考参数组合仍未验收，M1 尚未完成。
+
+## 2026-11-12 · M2：虚构阅读日报演示（部分完成）
+
+- 新增 `.venv/bin/mcpm history --demo`：临时创建虚构 Chrome 历史，复用真实读取、过滤和渲染流程，加载预录主题并执行编号校验；报告标明虚构记录和预录结果。共享构造器也供 `script/verify_mvp.py` 使用。样例有 19 个虚构页面（包含登录页）、重复访问和链接参数，过滤后保留 18 条记录；其中两个通用标题由程序归入“标题信息不足，未归类”。
+- 预录数据保存在 `src/minicpm_tools/reading_demo_themes.json`，包含原始响应：2026-11-12 使用本机 Ollama 的 `minicpm5-2b` Q4_K_M，对合成样例请求一次取得有效主题；基线提交 `737e5b9`，工作区包含尚未提交的标题兜底和演示数据改动。模型将 Python 与海洋内容合并为一个主题，故意保留此错误；结构校验不能证明主题语义正确。早先一次记录尝试因记录脚本未处理 JSON 代码围栏而失败，未生成预录文件，之后按既有解析规则重试并通过。
+- 运行 `.venv/bin/pytest -q -ra`：381 通过、0 跳过；Ruff（含演示脚本）、`git diff --check`、`uv lock --check --offline` 通过。预录编号损坏时测试确认不输出半成品；测试阻止网络连接和模型客户端创建。离线构建 wheel 并在临时 Python 3.13 环境使用 uv 缓存离线安装、运行演示通过；这不代表在无缓存的新机器上能够离线安装依赖。新增 Ubuntu CI 演示步骤尚未在 GitHub Actions 实跑。
+- 本地模型合成验收重跑通过：`.local/acceptance/mvp-n64101f9/report.json`；临时 loopback 模型服务已停止。样例报告为 `examples/reading-demo/sample-report.md`，与当前演示输出一致。未读取个人浏览历史。
+- 视频和主视觉尚未制作，分镜见 `docs/assets/README.md`；未验证完全断网或真实用户使用效果。M1 的真人验收和思考参数对照仍未完成。
+
+## 2026-11-12 · 阅读小票首版
+
+- 用户要求结合 `snipindex_receipt_proposal.md` 开发；实现位于现有 `mcpm history`，采用过滤去重后的记录数和不同域名数，不增加采集范围。新增 `--format receipt`（自包含 HTML + 原 Markdown）和 `--format receipt-share`（独立 HTML，只含日期、计数与主题），默认 Markdown 行为保留。虚构 demo 允许指定格式与输出目录。
+- HTML 使用热敏纸样式，详单主题下直接列标题链接和访问次数；分享版源码不包含标题、域名或 URL。HTML 转义外来标题和主题，限定链接协议，不加载外部资源，保留模型分类、虚构样例、近似快照和隐私提示。空记录可显示，长列表不截断。拒绝覆盖，并对普通成对写入失败尽力清理；不保证强制终止时跨文件原子性。
+- `.venv/bin/pytest -q -ra`：390 通过、0 跳过；Ruff、diff 检查通过。覆盖计数、转义、分享明细排除、错误分组、空列表、近似快照提示、现存文件保护、第二文件失败清理和 CLI 演示导出。`uv build --wheel --offline` 以及利用缓存在独立临时环境安装运行小票通过，CSS 和预录数据随包分发。
+- 浏览器插件未列出、本地 Playwright 不可用，使用可用的 CUA 内置浏览器检查实际页面：桌面默认视口和 390×844 手机视口显示正常；分享页宽度与 scrollWidth 均为 390、链接数 0；详单链接正确保留脱敏地址，控制台未见警告或错误。未点击真实外部页面。预览使用虚构数据，位于 `outputs/receipt-demo/`；预览 HTTP 服务仅绑定 127.0.0.1:8769，不是运行小票的必要依赖。
+- 用户此前反馈真实 Chrome 的 list 预览“正常”，这是用户自测反馈；真实 summary 尚无反馈。本轮不读取个人历史、不修改系统权限。PNG CLI 导出、实际打印/PDF 分页及 Safari/整机断网仍未验收，未提交或推送。
+
+## 2026-11-12 · 小票交接提交验证
+
+- 本次提交包含阅读日报定位、标题兜底、合成演示和 HTML 小票，不包含原工作区已有的音频与剪贴板修改。以上 390 项为完整工作区结果；从本次 Git 暂存内容导出的独立快照重新验证为 384 通过、0 跳过，Ruff 和暂存 diff 检查通过。
+- 前端样式入口为 `src/minicpm_tools/receipt.css`，HTML 结构入口为 `src/minicpm_tools/receipt.py`；可用 `mcpm history --demo --format receipt` 和 `--format receipt-share` 复现两种视图。

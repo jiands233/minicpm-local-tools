@@ -1,0 +1,45 @@
+{
+  "metadata": {
+    "model": "minicpm5-2b",
+    "quantization": "Q4_K_M",
+    "date": "2026-11-12",
+    "baseline_commit": "737e5b9",
+    "source": "本机 Ollama；工作区含未提交的标题兜底和演示数据修改；虚构记录"
+  },
+  "response": {
+    "themes": [
+      {
+        "label": "Python 编程与自然",
+        "ids": [
+          1,
+          2,
+          3,
+          4,
+          13,
+          14,
+          15,
+          16
+        ]
+      },
+      {
+        "label": "花园与阳台",
+        "ids": [
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      {
+        "label": "京都与旅行",
+        "ids": [
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    ]
+  },
+  "raw_response": "```json\n{\n  \"themes\": [\n    {\n      \"label\": \"Python 编程与自然\",\n      \"ids\": [1, 2, 3, 4, 13, 14, 15, 16]\n    },\n    {\n      \"label\": \"花园与阳台\",\n      \"ids\": [5, 6, 7, 8]\n    },\n    {\n      \"label\": \"京都与旅行\",\n      \"ids\": [9, 10, 11, 12]\n    }\n  ]\n}\n```"
+}

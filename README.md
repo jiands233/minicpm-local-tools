@@ -1,18 +1,42 @@
-# MiniCPM Local Tools
+# MiniCPM 本地阅读日报
 
-在 macOS 上运行的五个本地 AI 小工具，共用本地模型服务。当前是 v0.1 开发中的 MVP，不是五个独立安装包。数据默认留在本机；模型下载需要网络，推理不需要云账号。
+把浏览历史整理成可核对的本地阅读日报。macOS 上读取 Chrome 或 Safari 的访问记录，可用本地 MiniCPM5-2B 按标题和域名归类，输出 Markdown。
 
-五个入口均已实现并可运行，适合本地体验和继续开发。输出仍需人工核对：一次约 10 分 44 秒的公开多人情景会议测试生成了 75 条待办，包含大量误报并遗漏分工，音频纪要暂不适合作为无需核对的会议记录。
+- **来源可核对**：程序渲染原始标题和脱敏链接；模型只给记录分组。编号遗漏、重复或不存在时会重试，最终失败则拒绝输出摘要。脱敏链接可能无法返回原页面。
+- **不推断阅读内容**：不读取网页正文，不推断是否读完或用户观点；常见的通用标题归入“标题信息不足，未归类”，其他主题仍是模型判断，需要人工核对。
+- **本地处理**：客户端只连接 loopback 模型地址，不使用代理、重定向或云端回退。敏感页面过滤是规则匹配，不能保证排除所有私人内容；自定义本地服务也需自行确认不转发数据。
 
-| 工具 | 入口 | 能力 |
-|---|---|---|
-| 剪贴板 | 菜单栏 + `mcpm clipboard` | 翻译、精简、待办，中英文图片 OCR，快捷键 |
-| 文件夹搜索 | `mcpm search` | 指定目录 TXT/MD/PDF，扫描页 OCR，本地向量和关键词检索 |
-| 音频纪要 | `mcpm audio` | MLX Whisper 转写、时间戳、分块摘要、有原文引用的行动项 |
-| 阅读回顾 | `mcpm history` | Chrome/Safari 按日期导出，过滤和去重，本地主题归类 |
-| 命令助手 | `mcpm shell` | 生成、解释、预览；交互确认后执行有限的只读命令 |
+| 步骤 | 负责 |
+|---|---|
+| 读取历史快照、过滤、去重和渲染记录 | 程序 |
+| 按编号、标题和域名归类 | 本地 MiniCPM5-2B |
+| 通用标题兜底，检查编号完整、无重复和越界 | 程序；不保证主题语义正确 |
 
-详细说明：[剪贴板](docs/clipboard.md)、[搜索](docs/search.md)、[音频](docs/audio.md)、[阅读回顾](docs/history.md)、[命令助手](docs/shell.md)。[迭代记录](docs/PROGRESS.md)区分已经验证的行为和待完成项；[模型验收脚本](docs/verification.md)可重跑合成样本。
+## 快速试用
+
+安装基础依赖后，可先查看无需模型的虚构样例：
+
+```sh
+uv sync
+.venv/bin/mcpm history --demo
+```
+
+也可以生成可点击的小票 HTML：
+
+```sh
+.venv/bin/mcpm history --demo --format receipt --output-dir outputs/receipt-demo
+.venv/bin/mcpm history --demo --format receipt-share --output-dir outputs/receipt-demo
+```
+
+分享小票只保留计数与主题名，主题仍需核对。用浏览器打开输出文件即可查看；[详细说明](docs/history.md)包含真实历史用法。
+
+样例中的主题是预录的一次本地模型输出，保留了它把 Python 与海洋记录合并的错误，供核对。查看自己的昨天 Chrome 记录时，运行：
+
+```sh
+.venv/bin/mcpm history --browser chrome --date yesterday
+```
+
+默认不调用模型、不保存文件。历史库被独占锁定时请先关闭浏览器；内容可能含个人信息，请先检查再分享。安装与模型配置见下文；[阅读日报说明](docs/history.md)包含 Safari、权限及输出细节。
 
 ## 安装
 
@@ -69,7 +93,18 @@ uv sync --extra dev --extra pdf --extra audio
 
 [模型配置](docs/models.md)说明固定版本、磁盘空间和安装失败处理。允许分别配置文本、OCR、embedding 服务，但地址只接受 loopback。本工具禁用 HTTP 环境代理和跳转，不做远程回退。自定义的本地服务也应关闭云转发；项目启动脚本设置 `OLLAMA_NO_CLOUD=1`。
 
-## 五个入口
+## 其他实验
+
+这些入口保留供本地试验，尚不是独立安装包。音频会议待办质量未达标，需逐条核对；OCR 仅面向中英文，搜索只覆盖指定目录，命令助手只允许有限的只读执行。
+
+| 实验 | 入口 | 说明 |
+|---|---|---|
+| [剪贴板](docs/clipboard.md) | `mcpm clipboard` | 文本处理和中英文图片 OCR；物理快捷键及系统图片剪贴板完整链路仍待验收 |
+| [文件夹搜索](docs/search.md) | `mcpm search` | 指定目录的关键词及语义检索；扫描 PDF 支持 OCR |
+| [音频](docs/audio.md) | `mcpm audio` | 本地转写和纪要；会议待办质量未达标，仅供试验 |
+| [命令助手](docs/shell.md) | `mcpm shell` | 生成和解释建议；仅交互确认后执行有限的只读命令 |
+
+以下命令展示现有入口：
 
 ```sh
 # 1. 明确输入预览，不改剪贴板；真实剪贴板使用 --apply
@@ -109,6 +144,8 @@ uv sync --extra dev --extra pdf --extra audio
 示例使用的 Whisper tiny 适合体验流程，但中文人名、地点和长录音可能识别错误。其他本地 Whisper 权重的使用与测试限制见[音频说明](docs/audio.md)。
 
 普通输出写入失败或被中断时会尽力清理本次创建的不完整文件；清理前会检查文件身份，但检查与删除之间仍有极小竞态。强制结束进程、系统崩溃或无法确认文件身份时，半成品仍可能残留，请检查后处理。
+
+[项目范围](docs/ROADMAP.md)和[迭代记录](docs/PROGRESS.md)记录后续方向与验证状态。
 
 ## 验证与边界
 

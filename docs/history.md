@@ -1,5 +1,43 @@
 # 每日本地阅读回顾
 
+这份日报整理浏览器访问记录：程序保留原始标题和脱敏链接，本地模型可按标题与域名分组。它不读取网页正文，也不生成逐页摘要或推断你是否读完；主题分类可能出错，链接脱敏后也可能无法返回原页面。
+
+摘要模式下，标题为空、与域名相同或精确匹配通用标题（如“首页”“Home”“New Tab”）的记录不送模型，归入“标题信息不足，未归类”；规则不会识别所有含糊标题。全是这类记录时不调用模型。列表模式不做主题分组。
+
+## 虚构样例
+
+安装基础依赖后，运行 `.venv/bin/mcpm history --demo` 即可查看样例，不读取个人历史、不连接模型或网络。页面记录是虚构的；主题来自一次预录的本机 MiniCPM5-2B Q4_K_M 输出，运行时仍检查编号是否完整、重复或越界。模型把 Python 和海洋内容合成了一个主题，这是实际保留的分类错误，不代表正确归类；链接使用保留域名，仅用于演示。报告可直接查看 [sample-report.md](../examples/reading-demo/sample-report.md)。
+
+如果已准备好本地模型，可在新建的临时目录生成相同虚构数据库，再运行真实摘要作对照：
+
+```sh
+demo_dir=$(mktemp -d)
+.venv/bin/python examples/reading-demo/make_history.py "$demo_dir/History"
+.venv/bin/mcpm history --database "$demo_dir/History" --date 2026-11-12 --mode summary
+```
+
+对照结果每次由模型重新生成，可能与预录主题不同或因校验失败而拒绝输出。完成后可删除该临时目录；数据库仅含虚构数据。`--demo` 固定使用样例，只允许搭配输出格式和输出目录，不接受其他数据选择或模型选项。
+
+## 阅读小票
+
+小票复用同一套历史读取、过滤和主题校验。`--format receipt` 生成自包含 HTML：主题下直接列出可点击的页面标题、域名和访问次数；指定输出目录时，同时保存原 Markdown。`--format receipt-share` 只生成独立的分享 HTML，文件源码也不包含明细标题、URL 或域名。主题名仍可能涉及隐私，分享前请检查；本版不提供带标题分享开关。
+
+```sh
+# 虚构样例：不读私人历史、不联网、不调用模型
+.venv/bin/mcpm history --demo --format receipt --output-dir outputs/receipt-demo
+.venv/bin/mcpm history --demo --format receipt-share --output-dir outputs/receipt-demo
+# 自己的历史：先关闭浏览器，并启动本地模型服务
+.venv/bin/mcpm history --date yesterday --mode summary --format receipt --output-dir outputs/reading
+```
+
+用浏览器打开生成的 HTML 即可查看，无需启动 Web 服务；样式内嵌，不加载远程字体或图片。省略输出目录时 HTML 输出到终端。日期取筛选自然日；“访问记录”为过滤且去重后的页面数，站点为不同域名数，主题条数为该组页面数，不是阅读时长或读完数。
+
+默认仍输出 Markdown。list 模式的小票标明未作主题归类；摘要失败时仍拒绝输出，需显式改用 `--mode list`，不会为了出小票编造主题。空列表和近似快照警告也会出现在小票中。长列表完整显示，可滚动查看；未做截断或排名。
+
+输出文件为 `{日期}-reading.html`、`{日期}-reading.md`；分享版为 `{日期}-reading-share.html`，不同时导出私人 Markdown。所有文件拒绝覆盖，建议每次选新目录；成对写入非跨文件原子操作，普通失败尽力清理本次文件，强制终止仍可能留下一部分。
+
+浏览器打印样式已提供，可自行打印或保存 PDF。当前没有 CLI PNG 导出，中文打印分页和各浏览器 PDF 效果尚未验收。虚构演示依然保留预录模型将 Python 与海洋内容错误合组的情况。
+
 ```sh
 .venv/bin/mcpm history --browser chrome --date yesterday
 .venv/bin/mcpm history --browser safari --date 2026-11-12 --mode summary --output-dir outputs/reading

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import time
 from contextlib import closing
+from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
@@ -449,11 +451,26 @@ def _summarize_batch(batch, client, remaining):
         )
 
 
-def summarize(entries, client):
+_GENERIC_TITLES = frozenset({"首页", "主页", "home", "新标签页", "new tab", "untitled"})
+
+
+def _insufficient_title(entry):
+    title = " ".join((entry.get("title") or "").split()).casefold()
+    domain = " ".join((entry.get("domain") or "").split()).casefold()
+    return not title or title in _GENERIC_TITLES or (bool(domain) and title == domain)
+
+
+def summarize(entries, client=None):
     """Model labels groups; all page URLs/text are rendered from original evidence."""
     groups = []
-    for batch in history_batches(entries):
+    unclassified = [entry["id"] for entry in entries if _insufficient_title(entry)]
+    eligible = [entry for entry in entries if not _insufficient_title(entry)]
+    if eligible and client is None:
+        client = LocalClient.from_env()
+    for batch in history_batches(eligible):
         groups.extend(_summarize_batch(batch, client, [HISTORY_BATCH_RETRIES]))
+    if unclassified:
+        groups.append(("标题信息不足，未归类", unclassified))
     return groups
 
 
@@ -471,7 +488,7 @@ def render(entries, day, zone, groups=None, *, approximate=False):
             "",
         ]
     if groups:
-        lines += ["## 主题（模型归类，请核对）", ""]
+        lines += ["## 主题（含模型归类，请核对）", ""]
         for label, ids in groups:
             lines.append(f"- **{escape(label)}**：" + "、".join(f"记录 {i}" for i in ids))
         lines.append("")
@@ -488,7 +505,70 @@ def render(entries, day, zone, groups=None, *, approximate=False):
     return "\n".join(lines) + "\n"
 
 
+def _load_demo_response():
+    try:
+        data = json.loads(files("minicpm_tools").joinpath("reading_demo_themes.json").read_text(
+            encoding="utf-8"
+        ))
+        response = data["response"]
+        if not isinstance(response, dict):
+            raise TypeError("response must be an object")
+        return response
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ToolError("演示主题文件无效，无法生成演示报告。") from exc
+
+
+def demo_data():
+    from .reading_demo import DAY, ZONE, create_history
+
+    with tempfile.TemporaryDirectory(prefix="mcpm-reading-demo-") as tmp:
+        path = Path(tmp) / "History"
+        with closing(create_history(path)):
+            entries = read_history(path, "chrome", DAY, ZONE)
+        eligible = [entry for entry in entries if not _insufficient_title(entry)]
+        groups = _validate_summary(_load_demo_response(), eligible)
+        unclassified = [entry["id"] for entry in entries if _insufficient_title(entry)]
+        if unclassified:
+            groups.append(("标题信息不足，未归类", unclassified))
+    return entries, DAY, ZONE, groups
+
+
+def run_demo():
+    entries, day, zone, groups = demo_data()
+    return "> 演示：记录为虚构；主题为预录的 MiniCPM5-2B 输出，非本次运行。\n\n" + render(entries, day, zone, groups)
+
+
+def output_report(args, entries, day, zone, groups, *, demo=False, approximate=False):
+    result = render(entries, day, zone, groups, approximate=approximate)
+    if demo:
+        result = "> 演示：记录为虚构；主题为预录的 MiniCPM5-2B 输出，非本次运行。\n\n" + result
+    format_name = getattr(args, "format", "markdown")
+    if format_name != "markdown":
+        from .receipt import publish_receipt, render_receipt
+
+        share = format_name == "receipt-share"
+        html = render_receipt(entries, day, zone, groups, share=share, demo=demo,
+                              approximate=approximate)
+        if args.output_dir:
+            for path in publish_receipt(Path(args.output_dir).expanduser(), day, html, result,
+                                        share=share):
+                print(path)
+        else:
+            print(html)
+    elif args.output_dir:
+        print(write_new(Path(args.output_dir) / f"{day}-reading.md", result))
+    else:
+        print(result, end="")
+
+
 def run(args):
+    if getattr(args, "demo", False):
+        if (args.database or args.browser != "chrome" or args.date != "today"
+                or args.timezone != "Asia/Shanghai" or args.mode != "list"
+                or args.allow_approximate_snapshot):
+            raise ToolError("--demo 使用固定虚构数据，不能与其他 history 选项合用。")
+        output_report(args, *demo_data(), demo=True)
+        return
     try:
         zone = ZoneInfo(args.timezone)
     except KeyError as exc:
@@ -516,25 +596,23 @@ def run(args):
         snapshot_info=snapshot_info,
     )
     groups = (
-        summarize(entries, LocalClient.from_env()) if args.mode == "summary" and entries else None
+        summarize(entries) if args.mode == "summary" and entries else None
     )
-    result = render(
-        entries, day, args.timezone, groups, approximate=snapshot_info.get("approximate", False)
-    )
-    if args.output_dir:
-        print(write_new(Path(args.output_dir) / f"{day}-reading.md", result))
-    else:
-        print(result, end="")
+    output_report(args, entries, day, args.timezone, groups,
+                  approximate=snapshot_info.get("approximate", False))
 
 
 def register(subparsers):
     parser = subparsers.add_parser("history", help="本地浏览历史每日回顾")
     parser.add_argument("--browser", choices=["chrome", "safari"], default="chrome")
+    parser.add_argument("--demo", action="store_true", help="离线展示虚构历史与预录模型主题")
     parser.add_argument("--database", help="自定义 History SQLite 路径（不会修改源文件）")
     parser.add_argument("--date", default="today", help="today / yesterday / YYYY-MM-DD")
     parser.add_argument("--timezone", default="Asia/Shanghai")
     parser.add_argument("--mode", choices=["list", "summary"], default="list")
-    parser.add_argument("--output-dir", help="保存目录；省略时只预览")
+    parser.add_argument("--format", choices=["markdown", "receipt", "receipt-share"],
+                        default="markdown", help="Markdown、本地 HTML 小票或省略明细的分享小票")
+    parser.add_argument("--output-dir", help="保存目录；省略时输出到终端")
     parser.add_argument(
         "--allow-approximate-snapshot",
         action="store_true",

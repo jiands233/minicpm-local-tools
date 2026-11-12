@@ -30,6 +30,9 @@ jobs:
         run: .venv/bin/ruff check src tests script
       - name: Run Python tests
         run: .venv/bin/pytest -q
+      - name: Run offline reading demo
+        if: matrix.os == 'ubuntu-latest'
+        run: .venv/bin/mcpm history --demo | grep -F '演示：记录为虚构；主题为预录的 MiniCPM5-2B 输出'
       - name: Build the native macOS app
         if: matrix.os == 'macos-latest' && matrix.python == '3.12'
         run: swift build --package-path macos -c release
