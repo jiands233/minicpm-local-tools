@@ -245,3 +245,27 @@ def test_history_snapshot_open_failure_closes_source(tmp_path, monkeypatch):
     with pytest.raises(ToolError, match="历史数据库读取失败"):
         read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
     source.close.assert_called_once()
+
+
+def test_history_exclusive_lock_fails_promptly_without_modifying_database(tmp_path, monkeypatch):
+    import time
+
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE urls(id INTEGER, title TEXT, url TEXT); CREATE TABLE visits(url INTEGER, visit_time INTEGER);"
+    )
+    db.execute("BEGIN EXCLUSIVE")
+    try:
+        monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.25)
+        start = time.monotonic()
+        with pytest.raises(ToolError, match="被锁定"):
+            read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+        assert time.monotonic() - start < 2
+    finally:
+        db.rollback()
+        db.close()
+    with sqlite3.connect(path) as check:
+        assert check.execute("SELECT COUNT(*) FROM urls").fetchone()[0] == 0

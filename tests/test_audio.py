@@ -67,6 +67,7 @@ def test_summary_chunks_grounding_and_render():
     notes = summarize([Segment(0, 1, '明天提交报告。'), Segment(2, 4, 'a' * 510)], client, 500)
     assert client.calls == 6
     assert notes['rejected'] == 3
+    assert notes['overviews'] == ['准备报告。']
     rendered = render_notes(notes, '会议.wav')
     assert '负责人：未提及' in rendered
     assert '[00:00:00.000–00:00:01.000]' in rendered
@@ -185,3 +186,52 @@ def test_no_cross_segment_vocative_join_or_unrelated_clause_merging():
     assert [s.text for s in source_phrases([Segment(0, 1, '数据清洗已完成，明天提交报告。')])] == [
         '数据清洗已完成，', '明天提交报告。'
     ]
+
+
+def test_many_short_phrases_respect_encoded_request_budget():
+    from minicpm_tools.audio import MAX_CHUNK_JSON_BYTES
+    original = '小王明天交报告。' * 600
+    chunks = chunk_segments(source_phrases([Segment(0, 60, original)]))
+    assert len(chunks) > 1
+    assert ''.join(s.text for chunk in chunks for _, s in chunk) == original
+    assert all(
+        len(json.dumps([{'segment_id': key, 'text': seg.text} for key, seg in chunk], ensure_ascii=False).encode('utf-8')) <= MAX_CHUNK_JSON_BYTES
+        for chunk in chunks
+    )
+    assert all((s.start, s.end) == (0, 60) for chunk in chunks for _, s in chunk)
+
+
+def test_unicode_escape_bytes_and_long_single_segment_respect_budget():
+    from minicpm_tools.audio import MAX_CHUNK_JSON_BYTES
+    original = ('🧪"\\\n报告' * 1000)
+    chunks = chunk_segments([Segment(0, 30, original)])
+    assert ''.join(s.text for chunk in chunks for _, s in chunk) == original
+    for chunk in chunks:
+        data = [{'segment_id': key, 'text': seg.text} for key, seg in chunk]
+        assert len(json.dumps(data, ensure_ascii=False).encode('utf-8')) <= MAX_CHUNK_JSON_BYTES
+        assert sum(len(s.text) for _, s in chunk) <= 5000
+
+
+def test_many_tiny_items_limit_model_output_and_preserve_ids():
+    from minicpm_tools.audio import MAX_CHUNK_ITEMS
+    original = [Segment(i, i + 1, f'任务{i}。') for i in range(100)]
+    chunks = chunk_segments(original)
+    assert all(len(chunk) <= MAX_CHUNK_ITEMS for chunk in chunks)
+    flattened = [(key, seg) for chunk in chunks for key, seg in chunk]
+    assert [seg for _, seg in flattened] == original
+    assert [key for key, _ in flattened] == [f's{i}' for i in range(1, 101)]
+
+
+def test_no_silent_success_if_later_chunk_has_no_valid_sources():
+    class IncompleteClient:
+        def __init__(self):
+            self.calls = 0
+        def chat(self, prompt, system=''):
+            self.calls += 1
+            if self.calls <= 2:
+                return json.dumps({'key_points': ['s1'], 'actions': [], 'questions': []})
+            return json.dumps({'key_points': ['missing'], 'actions': [], 'questions': []})
+    # Two chunks because each short phrase is kept separate and capped at 24.
+    inputs = [Segment(i, i + 1, f'课程记录{i}。') for i in range(25)]
+    with pytest.raises(ToolError, match='第 2/2 块没有可核对'):
+        summarize(inputs, IncompleteClient())

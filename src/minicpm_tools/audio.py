@@ -116,21 +116,55 @@ def transcribe(path: Path, model: Path, language: str | None = None) -> list[Seg
         raise ToolError(f"本地 Whisper 转写失败（{type(exc).__name__}）；检查模型格式、音频和可用内存。") from exc
 
 
+# The request contains JSON field names and source IDs in addition to transcript
+# characters. A conservative UTF-8 byte budget leaves room for system prompts
+# and output in the documented 8192-token context. It is not a tokenizer or a
+# guarantee for arbitrary backends with smaller context windows.
+MAX_CHUNK_JSON_BYTES = 3600
+# Keep the response bounded when each tiny fragment becomes a separate task.
+MAX_CHUNK_ITEMS = 24
+
+
+def _encoded_item_size(key: str, text: str) -> int:
+    return len(json.dumps({"segment_id": key, "text": text}, ensure_ascii=False).encode("utf-8"))
+
+
 def chunk_segments(segments: list[Segment], limit: int = 5000) -> list[list[tuple[str, Segment]]]:
     if limit < 500:
         raise ToolError("--chunk-chars 至少为 500。")
     chunks, current, used = [], [], 0
+    # Two bytes for surrounding []; each subsequent item adds comma + space.
+    wire_bytes = 2
     serial = 1
     for segment in segments:
-        # A single long segment is split with the original timestamp range retained.
-        for offset in range(0, len(segment.text), limit):
-            part = Segment(segment.start, segment.end, segment.text[offset:offset + limit])
-            if current and used + len(part.text) > limit:
+        offset = 0
+        while offset < len(segment.text):
+            key = f"s{serial}"
+            # Split oversized single segments on Unicode character boundaries,
+            # retaining the original time interval rather than inventing timing.
+            low, high = 1, min(limit, len(segment.text) - offset)
+            count = 0
+            while low <= high:
+                middle = (low + high) // 2
+                fragment = segment.text[offset:offset + middle]
+                if _encoded_item_size(key, fragment) + 2 <= MAX_CHUNK_JSON_BYTES:
+                    count, low = middle, middle + 1
+                else:
+                    high = middle - 1
+            if not count:
+                raise ToolError("摘要分块无法容纳单个字符，请缩短输入。")
+            fragment = segment.text[offset:offset + count]
+            item_bytes = _encoded_item_size(key, fragment)
+            extra = item_bytes + (2 if current else 0)
+            if current and (used + len(fragment) > limit or wire_bytes + extra > MAX_CHUNK_JSON_BYTES or len(current) >= MAX_CHUNK_ITEMS):
                 chunks.append(current)
-                current, used = [], 0
-            current.append((f"s{serial}", part))
+                current, used, wire_bytes = [], 0, 2
+                extra = item_bytes
+            current.append((key, Segment(segment.start, segment.end, fragment)))
+            used += len(fragment)
+            wire_bytes += extra
+            offset += count
             serial += 1
-            used += len(part.text)
     if current:
         chunks.append(current)
     return chunks
@@ -266,12 +300,17 @@ def summarize(segments: list[Segment], client: LocalClient, chunk_chars: int = 5
         if isinstance(overview, str) and overview.strip():
             notes["overviews"].append(overview.strip())
         sources = dict(chunk)
+        chunk_valid = 0
         for field in ("key_points", "actions", "questions"):
             items, rejected = grounded_items(expand_references(value.get(field, []), sources), sources, action=field == "actions")
             notes[field].extend(items)
             notes["rejected"] += rejected
-    if not any(notes[field] for field in ("key_points", "actions", "questions")):
-        raise ToolError("模型未生成任何可核对的有效引用；未将空白或模板纪要标为成功，转写已保留。")
+            chunk_valid += len(items)
+        if not chunk_valid:
+            raise ToolError(f"第 {index}/{len(chunks)} 块没有可核对的有效引用；未将空白或模板纪要标为成功，转写已保留。")
+    # Adjacent or repeated chunks may produce exactly the same overview. Keep
+    # the first instance without trying to merge or rewrite model claims.
+    notes["overviews"] = list(dict.fromkeys(notes["overviews"]))
     for field in ("key_points", "actions", "questions"):
         unique = {}
         for item in notes[field]:

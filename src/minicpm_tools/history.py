@@ -7,6 +7,7 @@ import hashlib
 import re
 import sqlite3
 import tempfile
+import time
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -14,6 +15,9 @@ from zoneinfo import ZoneInfo
 
 from .client import LocalClient
 from .common import ToolError, parse_json, write_new
+
+BACKUP_LOCK_TIMEOUT = 3.0
+BACKUP_RETRY_INTERVAL = 0.1
 
 SENSITIVE = re.compile(
     r"login|signin|sign-in|oauth|callback|reset|password|token|checkout|payment|account|auth",
@@ -67,11 +71,30 @@ def read_history(path: Path, browser: str, day: dt.date, timezone: str):
         try:
             with (
                 closing(
-                    sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
+                    sqlite3.connect(
+                        path.resolve().as_uri() + "?mode=ro",
+                        uri=True,
+                        timeout=BACKUP_RETRY_INTERVAL,
+                    )
                 ) as source,
                 closing(sqlite3.connect(str(Path(tmp) / "snapshot.sqlite"))) as target,
             ):
-                source.backup(target)
+                busy_since = None
+
+                def check_backup_progress(status, remaining, total):
+                    nonlocal busy_since
+                    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                        now = time.monotonic()
+                        if busy_since is None:
+                            busy_since = now
+                        elif now - busy_since >= BACKUP_LOCK_TIMEOUT:
+                            raise ToolError("浏览器历史数据库暂时被锁定；请稍后重试。")
+                    else:
+                        busy_since = None
+
+                source.backup(
+                    target, pages=128, progress=check_backup_progress, sleep=BACKUP_RETRY_INTERVAL
+                )
                 if browser == "chrome":
                     query = """SELECT v.visit_time, u.title, u.url FROM visits v JOIN urls u ON u.id=v.url
                                WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""

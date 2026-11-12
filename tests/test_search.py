@@ -171,6 +171,25 @@ def test_no_ocr_explicitly_skips_blank_pdf(corpus):
     assert any("--no-ocr" in message for message in messages)
 
 
+def test_no_ocr_preserves_short_text_layer_as_searchable_content(tmp_path):
+    pytest.importorskip("pypdfium2")
+    root = tmp_path / "docs"
+    root.mkdir()
+    helper = runpy.run_path(str(Path(__file__).parents[1] / "examples/search_make_fixtures.py"))
+    (root / "brief.pdf").write_bytes(helper["text_pdf"](["Exam May 10"]))
+    index = tmp_path / "index.sqlite"
+    messages = []
+    client = FakeClient()
+    result = index_folder(
+        root, index, mode="keyword", ocr=False, client=client, progress=messages.append
+    )
+    hits = search_index(index, "Exam May", client=client)
+    assert result["ocr_pages"] == 0 and not client.images
+    assert len(hits) == 1 and hits[0].page == 1 and hits[0].source == "text"
+    assert "Exam May 10" in hits[0].excerpt
+    assert any("保留现有文字层" in message for message in messages)
+
+
 def test_text_layer_pdf_does_not_call_ocr(corpus):
     pytest.importorskip("pypdfium2")
     pytest.importorskip("PIL")

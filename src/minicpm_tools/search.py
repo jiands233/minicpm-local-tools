@@ -155,7 +155,11 @@ def _pdf_pages(path: Path, max_pages: int, client, ocr: bool, progress: Callable
                 source = "text"
                 if len(re.sub(r"\s", "", text)) < 20:
                     if not ocr:
-                        progress(f"  第 {number + 1} 页无足够文字层，--no-ocr 已跳过")
+                        if text.strip():
+                            progress(f"  第 {number + 1} 页文字较少，--no-ocr 保留现有文字层")
+                            yield number + 1, text, source
+                        else:
+                            progress(f"  第 {number + 1} 页无文字层，--no-ocr 已跳过")
                         continue
                     progress(f"  第 {number + 1} 页：本地 OCR")
                     # Bound rendering even for unusually large page dimensions.
