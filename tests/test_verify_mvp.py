@@ -51,3 +51,27 @@ def test_command_failure_retains_evidence_and_cannot_pass(tmp_path):
         )
     assert run.calls[0]["exit_code"] == 7
     assert run.calls[0]["stdout"].strip() == "diagnostic"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -type f -size +100M -exec sh -c 'mv a b' \\\\;",
+        "find . -type f -size +100M -execdir rm {} +",
+        "find . -type f -size +100M -ok echo {} \\\\;",
+        "find . -type f -size +100M -delete",
+        "find . -type f -size +100M -fprint result",
+        "find . -type f -size +100M > output",
+        "find . -type f -size +100M $(touch marker)",
+    ],
+)
+def test_large_file_acceptance_rejects_side_effects(command):
+    with pytest.raises(verify.CheckFailure):
+        verify.check_large_file_find(command)
+
+
+def test_large_file_acceptance_requires_expected_scope_and_predicates():
+    verify.check_large_file_find("find . -type f -size +100M")
+    verify.check_large_file_find("find . -size +100M -type f -print")
+    with pytest.raises(verify.CheckFailure):
+        verify.check_large_file_find("find / -type f -size +100M")

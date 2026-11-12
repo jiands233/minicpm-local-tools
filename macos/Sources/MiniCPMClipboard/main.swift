@@ -9,6 +9,24 @@ func emit(_ object: [String: Any]) {
     do { FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: object)); print("") }
     catch { fail("无法序列化剪贴板数据。") }
 }
+// Account for both sequential requests in image-todos, plus startup/clipboard time.
+// Very large valid settings leave the process to the client's own I/O timeouts.
+func watchdogSeconds(_ value: String?, action: String) -> Double? {
+    guard let text = value else { return (action == "image-todos" ? 2 : 1) * 180.0 + 60.0 }
+    guard let timeout = Double(text), timeout.isFinite, timeout > 0 else { return 60.0 }
+    let total = timeout * (action == "image-todos" ? 2 : 1) + 60.0
+    guard total.isFinite, total < 9_000_000 else { return nil }
+    return total
+}
+if CommandLine.arguments.contains("--self-test-timeouts") {
+    guard watchdogSeconds(nil, action: "ocr") == 240,
+          watchdogSeconds("300", action: "ocr") == 360,
+          watchdogSeconds("300", action: "image-todos") == 660,
+          watchdogSeconds("5", action: "image-todos") == 70,
+          watchdogSeconds("nan", action: "ocr") == 60,
+          watchdogSeconds("1e300", action: "ocr") == nil else { fail("Timeout calculation failed") }
+    emit(["ok": true, "checks": ["default", "long custom", "sequential requests", "short custom", "invalid", "very large"]]); exit(0)
+}
 func snapshot(_ board: NSPasteboard) throws -> [String: Any] {
     let count = board.changeCount
     var result: [String: Any] = ["change_count": count]
@@ -298,7 +316,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try process.run()
                 DispatchQueue.main.async { self.activeProcess = process }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 180) { if process.isRunning { process.terminate() } }
+                if let seconds = watchdogSeconds(environment["MINICPM_TIMEOUT"], action: action) {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                        if process.isRunning { process.terminate() }
+                    }
+                }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

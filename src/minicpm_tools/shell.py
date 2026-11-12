@@ -73,15 +73,55 @@ def execution_argv(command):
     return [str(binary), *argv[1:]]
 
 
+# Conservative heuristics, not a complete shell parser or safety guarantee.
+READ_INTENT = re.compile(
+    r"查找|搜索|查看|查询|列出|统计|显示|find|search|list|show|inspect", re.IGNORECASE
+)
+WRITE_INTENT = re.compile(
+    r"删除|清理|移动|重命名|改名|改为|替换|修改|写入|创建|执行|清空|remove|delete|rename|move|replace|write|create|execute",
+    re.IGNORECASE,
+)
+MUTATION = re.compile(
+    r"(?<![\w.-])(?:sudo|rm|rmdir|mv|cp|chmod|chown|dd|mkfs|diskutil|truncate|touch|tee|sed|perl|python\d*|ruby|sh|bash|zsh|eval|exec)(?![\w.-])",
+    re.IGNORECASE,
+)
+FIND_ACTION = re.compile(
+    r"(?:^|\s)-(?:exec(?:dir)?|ok(?:dir)?|delete|fprint(?:0)?|fprintf|fls)(?:\s|$)", re.IGNORECASE
+)
+SHELL_EVALUATION = re.compile(r"[;&|<>`]|\$\(|\$\{|(?:^|\s)source(?:\s|$)")
+
+
+def suggestion_risks(command):
+    """Flag detectable side effects or shell evaluation without claiming completeness."""
+    flags = []
+    if FIND_ACTION.search(command):
+        flags.append("find 动作可运行命令或修改文件")
+    if MUTATION.search(command):
+        flags.append("命令包含可能修改文件或运行其他程序的操作")
+    if SHELL_EVALUATION.search(command):
+        flags.append("命令包含重定向、组合或 shell 展开")
+    return flags
+
+
+def explicit_read_only_intent(intent):
+    return bool(READ_INTENT.search(intent) and not WRITE_INTENT.search(intent))
+
+
 def generate(intent, cwd, client):
     prompt = (
         f"系统：{platform.system()}，shell：zsh，工作目录：{cwd}。\n"
         f"用户需求：{intent}\n"
         "只返回 JSON，两项字符串：command 写实际的一行 macOS 命令，explanation 写中文解释及修改风险。"
-        "不要输出占位符，不用 sudo，不访问密钥。修改后缀应移除旧后缀再加新后缀，不得追加为txt.md；使用不覆盖已有文件的方式。磁盘总容量/剩余空间使用df。"
+        "只读查询绝不删除、写入或重命名；find 不用 -exec、-execdir、-ok、-delete 或输出到文件。不要输出占位符，不用 sudo，不访问密钥。修改后缀应移除旧后缀再加新后缀，不得追加为txt.md；使用不覆盖已有文件的方式。磁盘总容量/剩余空间使用df。"
     )
     data = parse_json(client.chat(prompt))
     command = validate_command(data.get("command"))
+    risks = suggestion_risks(command)
+    if explicit_read_only_intent(intent) and risks:
+        raise ToolError(
+            "只读需求的模型建议含有潜在写入或命令执行操作，已拒绝展示；请重试或换一种描述。"
+            + "；".join(risks)
+        )
     explanation = data.get("explanation")
     if not isinstance(explanation, str) or not explanation.strip():
         raise ToolError("模型未解释命令影响。")
@@ -119,6 +159,9 @@ def run(args):
         return confirm_execute(validate_command(args.text), cwd)
     command, explanation = generate(args.text, cwd, LocalClient.from_env())
     print(f"建议命令（尚未执行）：\n{command}\n\n{explanation}")
+    risks = suggestion_risks(command)
+    if risks:
+        print("规则提示：" + "；".join(risks) + "。请自行核对完整命令，风险规则并不完整。")
     if re.search(r"\bmv\b", command) and not re.search(r"\bmv\s+-[a-zA-Z]*n", command):
         print(
             "规则提示：此 mv 命令可能覆盖同名目标文件。模型解释中的‘安全’不构成保证；请先检查目标文件并采用防覆盖参数。"

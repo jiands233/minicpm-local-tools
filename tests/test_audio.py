@@ -11,6 +11,7 @@ from minicpm_tools.audio import (
     handle,
     parse_segments,
     render_notes,
+    source_phrases,
     summarize,
     timestamp,
     transcribe,
@@ -158,3 +159,29 @@ def test_task_boundary_regressions_from_real_model():
     assert len(valid) == 1
     assert valid[0]['owner'] == '小王'
     assert valid[0]['due'] == '明天下午'
+
+
+def test_vocative_stays_with_task_and_retains_original_timestamp():
+    source = Segment(2.5, 7.2, '小王，明天提交报告，小李， 周五检查参考文献。')
+    phrases = source_phrases([source])
+    assert [item.text for item in phrases] == ['小王，明天提交报告，', '小李， 周五检查参考文献。']
+    assert all(item.start == 2.5 and item.end == 7.2 for item in phrases)
+    assert all(item.text in source.text for item in phrases)
+    sources = {'s1': phrases[0], 's2': phrases[1]}
+    valid, rejected = grounded_items([
+        {'segment_id': 's1', 'evidence': phrases[0].text, 'owner': '小王', 'due': '明天'},
+        {'segment_id': 's2', 'evidence': phrases[1].text, 'owner': '张三', 'due': '周五'},
+    ], sources, action=True)
+    assert rejected == 0
+    assert valid[0]['owner'] == '小王'
+    assert valid[1]['owner'] == '未提及'  # Never infer or substitute a name.
+    assert valid[1]['due'] == '周五'
+
+
+def test_no_cross_segment_vocative_join_or_unrelated_clause_merging():
+    first = Segment(0, 2, '小王，')
+    second = Segment(3, 5, '明天提交报告。')
+    assert source_phrases([first, second]) == [first, second]
+    assert [s.text for s in source_phrases([Segment(0, 1, '数据清洗已完成，明天提交报告。')])] == [
+        '数据清洗已完成，', '明天提交报告。'
+    ]

@@ -190,13 +190,32 @@ def grounded_items(items: object, sources: dict[str, Segment], *, action=False) 
     return valid, rejected
 
 
+# A short vocative before a comma often names the person assigned the next
+# clause. Merge only within the same Whisper segment; we have no speaker data
+# proving that text in adjacent segments belongs to the same person.
+_VOCATIVE = re.compile(
+    r"^\s*(?:[小老大][\u3400-\u9fff]{1,2}|"
+    r"[\u3400-\u9fff]{1,3}(?:老师|老師|同学|同學|经理|經理|教授|先生|女士)|"
+    r"[赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜]"
+    r"[\u3400-\u9fff]{1,2}|[A-Z][a-z]{1,20})[，,]\s*$"
+)
+
+
 def source_phrases(segments: list[Segment]) -> list[Segment]:
-    """Expose short verbatim units to small models without inventing fine timestamps."""
+    """Keep short addressees next to their clause without inventing timestamps."""
     result = []
     for segment in segments:
-        for phrase in re.split(r"(?<=[。！？；，,;!?])|(?<=[.])\s+", segment.text):
+        pieces = re.split(r"(?<=[。！？；，,;!?])|(?<=[.])\s+", segment.text)
+        i = 0
+        while i < len(pieces):
+            phrase = pieces[i]
+            # The joined source remains a verbatim substring, including whitespace.
+            if _VOCATIVE.fullmatch(phrase) and i + 1 < len(pieces) and pieces[i + 1].strip():
+                phrase += pieces[i + 1]
+                i += 1
             if phrase.strip():
                 result.append(Segment(segment.start, segment.end, phrase.strip()))
+            i += 1
     return result
 
 

@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -357,6 +358,23 @@ def history(run):
         db.close()
 
 
+def check_large_file_find(command):
+    """For this fixture only accept a simple read-only find with the required predicates."""
+    require(not re.search(r"[;&|<>`$\n\r]", command), "Large-file command uses shell evaluation")
+    try:
+        words = shlex.split(command)
+    except ValueError as exc:
+        raise CheckFailure("Large-file command has invalid quoting") from exc
+    require(words[:2] == ["find", "."], "Large-file command must search current directory")
+    tail = words[2:]
+    if tail and tail[-1] == "-print":
+        tail = tail[:-1]
+    require(
+        tail in (["-type", "f", "-size", "+100M"], ["-size", "+100M", "-type", "f"]),
+        "Large-file command has unsupported predicates or actions",
+    )
+
+
 def shell(run):
     cases = [
         ("查找当前目录里大于100MB的文件", "find"),
@@ -371,10 +389,7 @@ def shell(run):
         command = command_from_preview(output)
         require(command.split()[0] == expected_program, f"Unexpected command for {intent}")
         if expected_program == "find":
-            require(
-                "-size" in command and "100" in command and "-delete" not in command,
-                "Large-file suggestion missed constraint",
-            )
+            check_large_file_find(command)
         if expected_program == "lsof":
             require("8080" in command, "Port suggestion lost port")
         results.append({"intent": intent, "output": output})
