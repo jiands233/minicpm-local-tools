@@ -225,7 +225,13 @@ def index_folder(
         CREATE TABLE chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, page INTEGER,
         body TEXT NOT NULL, source TEXT NOT NULL, vector TEXT);""")
         db.execute(f"PRAGMA application_id = {INDEX_APPLICATION_ID}")
-        for directory, dirs, names in os.walk(root, followlinks=False):
+        def handle_walk_error(exc: OSError) -> None:
+            # os.walk silently skips inaccessible directories unless onerror is set.
+            # Aborting avoids publishing a silently incomplete replacement index.
+            location = exc.filename or str(root)
+            raise ToolError(f"无法读取资料目录：{location}；请检查访问权限，原索引未修改。") from exc
+
+        for directory, dirs, names in os.walk(root, followlinks=False, onerror=handle_walk_error):
             dirs[:] = sorted(
                 d for d in dirs if not d.startswith(".") and not (Path(directory) / d).is_symlink()
             )

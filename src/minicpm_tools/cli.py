@@ -37,7 +37,12 @@ def run_doctor(args):
     ):
         try:
             data = client._request(url, "/models")
-            names = [m["id"] for m in data.get("data", [])]
+            rows = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(rows, list) or any(
+                not isinstance(row, dict) or not isinstance(row.get("id"), str) for row in rows
+            ):
+                raise ToolError("本地服务的模型列表格式无效；请检查服务地址和 API 兼容性。")
+            names = [row["id"] for row in rows]
             present = model in names or any(n == model + ":latest" for n in names)
             print(f"{label}: {url} · {model} · {'可见' if present else '服务可达，模型名称未匹配'}")
             failed |= not present

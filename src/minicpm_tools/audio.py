@@ -314,7 +314,13 @@ def summarize(segments: list[Segment], client: LocalClient, chunk_chars: int = 5
     for field in ("key_points", "actions", "questions"):
         unique = {}
         for item in notes[field]:
-            unique.setdefault((item["text"], item["evidence"], item["start"]), item)
+            # Distinct source time ranges or task assignments are not duplicates,
+            # even when they share a start timestamp and the same quoted words.
+            identity = (
+                item["text"], item["evidence"], item["start"], item["end"],
+                item.get("owner"), item.get("due"),
+            )
+            unique.setdefault(identity, item)
         notes[field] = list(unique.values())
     return notes
 

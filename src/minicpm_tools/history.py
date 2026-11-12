@@ -18,6 +18,10 @@ from .common import ToolError, parse_json, write_new
 
 BACKUP_LOCK_TIMEOUT = 3.0
 BACKUP_RETRY_INTERVAL = 0.1
+# Reserve space for the instruction and response in small local models.
+# A byte budget is conservative, not a replacement for a model tokenizer.
+HISTORY_BATCH_BYTES = 3600
+HISTORY_BATCH_ITEMS = 60
 
 SENSITIVE = re.compile(
     r"login|signin|sign-in|oauth|callback|reset|password|token|checkout|payment|account|auth",
@@ -136,11 +140,29 @@ def escape(text):
     return re.sub(r"([\\`*_{}\[\]<>])", r"\\\1", text).replace("\r", " ").replace("\n", " ")
 
 
+def history_batches(entries):
+    """Preserve order while accounting for IDs and UTF-8 title bytes."""
+    batch, size = [], 0
+    for entry in entries:
+        line = f"{entry['id']} {entry['title']}"
+        line_bytes = len(line.encode("utf-8"))
+        if line_bytes > HISTORY_BATCH_BYTES:
+            raise ToolError("单条阅读记录过长，无法安全提交模型；请使用 --mode list。")
+        extra = line_bytes + (1 if batch else 0)
+        if batch and (len(batch) >= HISTORY_BATCH_ITEMS or size + extra > HISTORY_BATCH_BYTES):
+            yield batch
+            batch, size = [], 0
+            extra = line_bytes
+        batch.append(entry)
+        size += extra
+    if batch:
+        yield batch
+
+
 def summarize(entries, client):
     """Model labels groups; all page URLs/text are rendered from original evidence."""
     groups = []
-    for offset in range(0, len(entries), 60):
-        batch = entries[offset : offset + 60]
+    for batch in history_batches(entries):
         prompt = "\n".join(f"{e['id']} {e['title']}" for e in batch)
         response = parse_json(
             client.chat(

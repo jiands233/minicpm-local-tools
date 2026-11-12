@@ -269,3 +269,41 @@ def test_history_exclusive_lock_fails_promptly_without_modifying_database(tmp_pa
         db.close()
     with sqlite3.connect(path) as check:
         assert check.execute("SELECT COUNT(*) FROM urls").fetchone()[0] == 0
+
+
+def test_history_batches_bound_encoded_input_and_cover_all_records():
+    from minicpm_tools.history import HISTORY_BATCH_BYTES, history_batches
+
+    records = [{"id": i, "title": "合成标题" + "知识资料" * 70} for i in range(1, 61)]
+    batches = list(history_batches(records))
+    assert len(batches) > 1
+    assert [row["id"] for batch in batches for row in batch] == list(range(1, 61))
+    assert [row for batch in batches for row in batch] == records
+    for batch in batches:
+        request = "\n".join(f"{r['id']} {r['title']}" for r in batch)
+        assert len(request.encode("utf-8")) <= HISTORY_BATCH_BYTES
+        assert len(batch) <= 60
+
+    class Fake:
+        def chat(self, prompt, **kwargs):
+            import json
+
+            records = [line for line in prompt.splitlines() if line[:1].isdigit()]
+            return json.dumps(
+                {
+                    "themes": [
+                        {"label": "合成资料", "ids": [int(row.split(" ", 1)[0]) for row in records]}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    grouped = summarize(records, Fake())
+    assert [i for _, ids in grouped for i in ids] == list(range(1, 61))
+
+
+def test_history_batch_rejects_oversized_single_title():
+    from minicpm_tools.history import history_batches
+
+    with pytest.raises(ToolError, match="单条阅读记录过长"):
+        list(history_batches([{"id": 1, "title": "测" * 1300}]))

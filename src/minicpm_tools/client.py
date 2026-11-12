@@ -170,5 +170,5 @@ class LocalClient:
             ):
                 raise ValueError("invalid vectors")
             return vectors
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise ToolError("Embedding 服务返回了无效向量。") from exc

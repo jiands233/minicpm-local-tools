@@ -1,6 +1,7 @@
 """Deterministic unit/integration fixtures, not model-quality benchmarks."""
 
 import json
+import os
 import runpy
 import sqlite3
 from pathlib import Path
@@ -342,3 +343,41 @@ def test_replace_new_path_wont_clobber_file_created_during_build(corpus):
             root, index, mode="keyword", client=FakeClient(), replace=True, progress=create_target
         )
     assert index.read_text() == "concurrent file"
+
+
+def test_unreadable_subdirectory_aborts_rebuild_and_preserves_previous_index(corpus):
+    root, index = corpus
+    client = FakeClient()
+    index_folder(root, index, mode="keyword", client=client)
+    old_index = index.read_bytes()
+    denied = root / "private-course"
+    denied.mkdir()
+    (denied / "lesson.txt").write_text("biology exercise")
+    denied.chmod(0)
+    try:
+        if os.access(denied, os.R_OK | os.X_OK):
+            pytest.skip("current user can read mode-000 directories")
+        with pytest.raises(ToolError, match="无法读取资料目录"):
+            index_folder(root, index, mode="keyword", client=client, replace=True)
+    finally:
+        denied.chmod(0o700)
+    assert index.read_bytes() == old_index
+    assert search_index(index, "biology", client=client)[0].path.endswith("marine.md")
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_unreadable_subdirectory_never_publishes_new_index(corpus):
+    root, index = corpus
+    denied = root / "inaccessible"
+    denied.mkdir()
+    (denied / "missing.txt").write_text("this content must not be silently omitted")
+    denied.chmod(0)
+    try:
+        if os.access(denied, os.R_OK | os.X_OK):
+            pytest.skip("current user can read mode-000 directories")
+        with pytest.raises(ToolError, match="无法读取资料目录"):
+            index_folder(root, index, mode="keyword", client=FakeClient())
+    finally:
+        denied.chmod(0o700)
+    assert not index.exists()
+    assert not list(index.parent.glob(".index.sqlite.*"))

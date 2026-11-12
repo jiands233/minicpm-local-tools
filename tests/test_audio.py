@@ -235,3 +235,30 @@ def test_no_silent_success_if_later_chunk_has_no_valid_sources():
     inputs = [Segment(i, i + 1, f'课程记录{i}。') for i in range(25)]
     with pytest.raises(ToolError, match='第 2/2 块没有可核对'):
         summarize(inputs, IncompleteClient())
+
+
+def test_summary_preserves_distinct_time_ranges_and_assignments():
+    class SelectionClient:
+        def chat(self, prompt, system=''):
+            data = json.loads(prompt.split('资料：\n', 1)[1])
+            return json.dumps({
+                'overview': '报告安排',
+                'key_points': [item['segment_id'] for item in data],
+                'questions': [],
+                'actions': [
+                    {'segment_id': data[0]['segment_id'], 'owner': '小王', 'due': '明天'},
+                    {'segment_id': data[0]['segment_id'], 'owner': '小李', 'due': '明天'},
+                    {'segment_id': data[0]['segment_id'], 'owner': '小王', 'due': '未提及'},
+                    {'segment_id': data[1]['segment_id'], 'owner': '小王', 'due': '明天'},
+                    {'segment_id': data[1]['segment_id'], 'owner': '小王', 'due': '明天'},
+                ],
+            }, ensure_ascii=False)
+    text = '小王小李明天提交报告。'
+    notes = summarize([Segment(0, 1, text), Segment(0, 9, text)], SelectionClient())
+    assert [(item['start'], item['end']) for item in notes['key_points']] == [(0, 1), (0, 9)]
+    assert [(item['end'], item['owner'], item['due']) for item in notes['actions']] == [
+        (1, '小王', '明天'), (1, '小李', '明天'), (1, '小王', '未提及'), (9, '小王', '明天')
+    ]
+    rendered = render_notes(notes, 'fixture.wav')
+    assert '[00:00:00.000–00:00:01.000]' in rendered
+    assert '[00:00:00.000–00:00:09.000]' in rendered
