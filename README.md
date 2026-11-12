@@ -46,6 +46,8 @@ uv sync --extra dev --extra pdf --extra audio
 # 2. 样本文件夹语义搜索
 .venv/bin/mcpm search index examples/search-corpus --index .local/demo.sqlite
 .venv/bin/mcpm search query '海洋中呼吸空气的动物' --index .local/demo.sqlite
+# 文件变化后，复用设置兼容且未变化的文件（不自动监听）
+.venv/bin/mcpm search index examples/search-corpus --index .local/demo.sqlite --replace --incremental
 
 # 3. 本地录音 -> 转写 + 纪要（需已下载 Whisper 权重）
 .venv/bin/mcpm audio /path/to/recording.m4a --whisper-model .local/whisper-tiny --output-dir outputs/audio

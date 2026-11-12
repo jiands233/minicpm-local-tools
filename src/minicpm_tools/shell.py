@@ -201,6 +201,8 @@ def run(args):
             ))
         )
         print(f"终端上下文：{shell_name}（{provenance}）。")
+        if args.execute:
+            return confirm_execute(command, cwd)
         return
     if args.action == "run":
         return confirm_execute(validate_command(args.text), cwd)
@@ -244,6 +246,6 @@ def register(subparsers):
                 help="指定目标 shell；不指定时检测父进程或使用登录 shell",
             )
         p.add_argument(
-            "--execute", action="store_true", help="生成后进入交互确认，仅支持白名单只读命令"
+            "--execute", action="store_true", help="处理后进入交互确认，仅支持白名单只读命令"
         )
         p.set_defaults(func=run)

@@ -148,3 +148,56 @@ def test_untrusted_model_text_does_not_send_terminal_controls(
     assert "\x1b" not in output and "\x07" not in output and "\u202e" not in output
     assert r"\x1b" in output and r"\x07" in output and r"\u202e" in output
     assert "\n解释" in output
+
+
+@pytest.mark.parametrize("answer,expected_calls,expected_code", [("", 0, 0), ("EXECUTE", 1, 7)])
+def test_explain_execute_uses_confirmation_and_propagates_exit_code(
+    monkeypatch, tmp_path, answer, expected_calls, expected_code
+):
+    from types import SimpleNamespace
+
+    from minicpm_tools import cli, shell
+
+    class FakeExplanation:
+        def chat(self, *args, **kwargs):
+            return "显示当前目录。"
+
+    monkeypatch.setattr(shell.LocalClient, "from_env", lambda: FakeExplanation())
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
+    calls = []
+    monkeypatch.setattr(
+        shell.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs))
+        or SimpleNamespace(returncode=7)
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["mcpm", "shell", "explain", "pwd", "--shell", "bash", "--cwd", str(tmp_path), "--execute"]
+    )
+    assert cli.main() == expected_code
+    assert len(calls) == expected_calls
+    if calls:
+        assert Path(calls[0][0][0][0]).name == "pwd"
+        assert calls[0][1]["cwd"] == tmp_path
+        assert calls[0][1]["shell"] is False
+
+
+def test_explain_execute_rejects_noninteractive_and_unapproved_commands(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from minicpm_tools import shell
+
+    class FakeExplanation:
+        def chat(self, *args, **kwargs):
+            return "仅供说明。"
+
+    monkeypatch.setattr(shell.LocalClient, "from_env", lambda: FakeExplanation())
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(shell.subprocess, "run", lambda *a, **k: pytest.fail("must not execute"))
+    args = SimpleNamespace(action="explain", text="pwd", cwd=str(tmp_path), shell="bash", execute=True)
+    with pytest.raises(ToolError, match="交互式终端"):
+        shell.run(args)
+    args.text = "rm example"
+    with pytest.raises(ToolError):
+        shell.run(args)
+    args.text, args.execute = "pwd", False
+    shell.run(args)

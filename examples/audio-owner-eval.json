@@ -1,0 +1,165 @@
+{
+  "description": "Handwritten, fictional text-only cases; task and owner labels are editorial judgements, not real recordings or an accuracy benchmark.",
+  "cases": [
+    {
+      "text": "小王明天下午提交报告。",
+      "owner": "小王",
+      "task": true
+    },
+    {
+      "text": "小李周五检查参考文献。",
+      "owner": "小李",
+      "task": true
+    },
+    {
+      "text": "明天给小王发报告。",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "请明天向小赵提交文档。",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "由小孙检查数据。",
+      "owner": "小孙",
+      "task": true
+    },
+    {
+      "text": "小周建议小吴明天提交报告。",
+      "owner": "小吴",
+      "task": true
+    },
+    {
+      "text": "小李安排小王周五整理数据。",
+      "owner": "小王",
+      "task": true
+    },
+    {
+      "text": "让张三联系李四。",
+      "owner": "张三",
+      "task": true
+    },
+    {
+      "text": "请联系张三确认时间。",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "报告需要明天提交。",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "由李老师审核申请。",
+      "owner": "李老师",
+      "task": true
+    },
+    {
+      "text": "小陈会在周一更新计划。",
+      "owner": "小陈",
+      "task": true
+    },
+    {
+      "text": "Alice will submit the report tomorrow.",
+      "owner": "Alice",
+      "task": true
+    },
+    {
+      "text": "Bob will review the data on Friday.",
+      "owner": "Bob",
+      "task": true
+    },
+    {
+      "text": "Send the report to Alice tomorrow.",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "Please ask Bob for the data tomorrow.",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "The report needs to be sent to Carol.",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "Carol will email David the report.",
+      "owner": "Carol",
+      "task": true
+    },
+    {
+      "text": "David asked Alice to update the plan.",
+      "owner": "Alice",
+      "task": true
+    },
+    {
+      "text": "Eve volunteered to review the notes.",
+      "owner": "Eve",
+      "task": true
+    },
+    {
+      "text": "Please send Bob a copy of the report.",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "Alice is responsible for reviewing the proposal.",
+      "owner": "Alice",
+      "task": true
+    },
+    {
+      "text": "The report should be reviewed tomorrow.",
+      "owner": null,
+      "task": true
+    },
+    {
+      "text": "Frank will check the results tomorrow.",
+      "owner": "Frank",
+      "task": true
+    },
+    {
+      "text": "数据清洗昨天已经完成。",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "小王周一已经交了报告。",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "今天讨论课程报告的安排。",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "负责人和截止时间还没有确定。",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "是否增加一组对照实验？",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "Alice sent the report yesterday.",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "The team discussed the draft.",
+      "owner": null,
+      "task": false
+    },
+    {
+      "text": "Bob completed the review last week.",
+      "owner": null,
+      "task": false
+    }
+  ]
+}

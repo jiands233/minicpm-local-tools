@@ -516,3 +516,182 @@ def test_no_results_still_warn_when_source_changed(corpus, capsys):
     assert json.loads(result.out) == []
     assert "1 个文件已变化" in result.err
     assert "--replace" in result.err
+
+
+def test_incremental_reuses_unchanged_and_handles_changed_added_deleted(corpus):
+    root, index = corpus
+    removed = root / "deleted.md"
+    removed.write_text("only deleted text")
+    first = FakeClient()
+    index_folder(root, index, client=first)
+    with sqlite3.connect(index) as db:
+        old_marine = db.execute(
+            "SELECT body,vector FROM chunks WHERE path=?", (str(root / "marine.md"),)
+        ).fetchall()
+    (root / "algebra.txt").write_text("Changed calculus lesson with unique new terms.")
+    removed.unlink()
+    (root / "new.md").write_text("New course introduction.")
+    client = FakeClient()
+    result = index_folder(root, index, client=client, replace=True, incremental=True)
+    embedded = [value for batch in client.batches for value in batch]
+    assert len(embedded) == 2
+    assert any("Changed calculus" in text for text in embedded)
+    assert any("New course" in text for text in embedded)
+    assert not any("Marine biology" in text for text in embedded)
+    assert result["files"] == 3 and result["reused_files"] == 1
+    with sqlite3.connect(index) as db:
+        assert db.execute(
+            "SELECT body,vector FROM chunks WHERE path=?", (str(root / "marine.md"),)
+        ).fetchall() == old_marine
+        assert db.execute("SELECT COUNT(*) FROM chunks WHERE path=?", (str(removed),)).fetchone()[0] == 0
+    assert search_index(index, "calculus", mode="keyword", client=client)[0].path.endswith("algebra.txt")
+    assert search_index(index, "introduction", mode="keyword", client=client)[0].path.endswith("new.md")
+    assert not search_index(index, "deleted", mode="keyword", client=client)
+
+
+@pytest.mark.parametrize("change", ["legacy", "embedding_model", "embedding_url", "ocr_model", "ocr_url", "max_pages", "no_ocr", "mode"])
+def test_incremental_incompatible_or_legacy_settings_rebuild_every_file(corpus, change):
+    root, index = corpus
+    initial = FakeClient()
+    initial.embedding_url = "http://127.0.0.1:12001/v1"
+    initial.ocr_model = "test-ocr"
+    initial.ocr_url = "http://127.0.0.1:12002/v1"
+    index_folder(root, index, client=initial)
+    if change == "legacy":
+        with sqlite3.connect(index) as db:
+            db.execute("DELETE FROM metadata WHERE key='extraction_revision'")
+    client = FakeClient()
+    client.embedding_url = initial.embedding_url
+    client.ocr_model = initial.ocr_model
+    client.ocr_url = initial.ocr_url
+    kwargs = {}
+    if change == "embedding_model":
+        client.embedding_model = "other"
+    elif change == "embedding_url":
+        client.embedding_url = "http://127.0.0.1:12003/v1"
+    elif change == "ocr_model":
+        client.ocr_model = "other-ocr"
+    elif change == "ocr_url":
+        client.ocr_url = "http://127.0.0.1:12004/v1"
+    elif change == "max_pages":
+        kwargs["max_pages"] = 2
+    elif change == "no_ocr":
+        kwargs["ocr"] = False
+    elif change == "mode":
+        kwargs["mode"] = "keyword"
+    messages = []
+    result = index_folder(root, index, client=client, replace=True, incremental=True,
+                          progress=messages.append, **kwargs)
+    assert result["reused_files"] == 0
+    assert any("完整重建" in message for message in messages)
+    if change != "mode":
+        assert sum(len(batch) for batch in client.batches) == 2
+
+
+def test_incremental_rejects_invalid_vectors_without_replacing_old_index(corpus):
+    root, index = corpus
+    index_folder(root, index, client=FakeClient())
+    with sqlite3.connect(index) as db:
+        db.execute("UPDATE chunks SET vector='[0, 0]' WHERE path=?", (str(root / "marine.md"),))
+    before = index.read_bytes()
+    with pytest.raises(ToolError, match="零向量"):
+        index_folder(root, index, client=FakeClient(), replace=True, incremental=True)
+    assert index.read_bytes() == before
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_incremental_checks_new_vectors_against_reused_dimensions(corpus):
+    root, index = corpus
+    index_folder(root, index, client=FakeClient())
+    (root / "algebra.txt").write_text("changed file")
+    before = index.read_bytes()
+
+    class ChangedShape(FakeClient):
+        def embed(self, texts):
+            return [[1, 2, 3] for _ in texts]
+
+    with pytest.raises(ToolError, match="维度"):
+        index_folder(root, index, client=ChangedShape(), replace=True, incremental=True)
+    assert index.read_bytes() == before
+
+
+def test_incremental_rechecks_all_sources_before_publishing(corpus):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    before = index.read_bytes()
+    (root / "z-new.txt").write_text("new content")
+    def mutate_after_reuse(message):
+        if message.startswith("索引 z-new.txt"):
+            (root / "algebra.txt").write_text("changed after it was reused")
+    with pytest.raises(ToolError, match="索引期间发生变化"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True,
+                     incremental=True, progress=mutate_after_reuse)
+    assert index.read_bytes() == before
+
+
+def test_incremental_pdf_reuses_all_chunks_but_counts_unique_ocr_page(corpus):
+    pdfium = pytest.importorskip("pypdfium2")
+    pytest.importorskip("PIL")
+    root, index = corpus
+    document = pdfium.PdfDocument.new()
+    page = document.new_page(200, 200)
+    page.close()
+    document.save(root / "scan.pdf")
+    document.close()
+    class LongOCR(FakeClient):
+        def ocr(self, image):
+            self.images.append(str(image))
+            return "长期课程笔记" * 500
+    initial = LongOCR()
+    result = index_folder(root, index, mode="keyword", client=initial)
+    assert result["ocr_pages"] == 1 and len(initial.images) == 1
+    next_client = LongOCR()
+    result = index_folder(root, index, mode="keyword", client=next_client,
+                          replace=True, incremental=True)
+    assert result["ocr_pages"] == 1 and result["reused_files"] == 3
+    assert next_client.images == []
+
+
+def test_incremental_requires_existing_explicit_replace(corpus):
+    root, index = corpus
+    with pytest.raises(ToolError, match="增量更新需要"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True, incremental=True)
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    with pytest.raises(ToolError):
+        index_folder(root, index, mode="keyword", client=FakeClient(), incremental=True)
+
+
+def test_incremental_preserves_empty_files_and_exposes_no_backend_url(corpus, capsys):
+    root, index = corpus
+    (root / "empty.txt").write_text("")
+    secret_url = "http://127.0.0.1:12001/v1/private-path-credential"
+    client = FakeClient()
+    client.embedding_url = secret_url
+    client.ocr_url = secret_url
+    result = index_folder(root, index, client=client)
+    assert result["files"] == 3
+    assert secret_url not in json.dumps(result)
+    assert secret_url.encode() not in index.read_bytes()
+    client.batches.clear()
+    next_result = index_folder(root, index, client=client, replace=True, incremental=True)
+    assert next_result["reused_files"] == 3 and client.batches == []
+    assert secret_url not in json.dumps(next_result)
+    assert secret_url not in capsys.readouterr().err
+    assert secret_url.encode() not in index.read_bytes()
+
+
+def test_incremental_rejects_index_changed_during_reuse(corpus, tmp_path):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    original = index.read_bytes()
+    other_path = tmp_path / "moved.sqlite"
+    def replace_target(message):
+        if message.startswith("复用 ") and not other_path.exists():
+            index.rename(other_path)
+            index.write_bytes(b"concurrently created user file")
+    with pytest.raises(ToolError, match="拒绝覆盖"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True,
+                     incremental=True, progress=replace_target)
+    assert index.read_bytes() == b"concurrently created user file"
+    assert other_path.read_bytes() == original
+    assert not list(index.parent.glob(".index.sqlite.*"))

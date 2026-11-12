@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from .client import LocalClient
 from .common import ToolError
 
 INDEX_APPLICATION_ID = 0x4D43504D
+EXTRACTION_REVISION = 1
 
 
 def _file_identity(st):
@@ -119,6 +121,13 @@ def _embedding_model(client) -> str:
     return str(getattr(client, "embedding_model", os.environ.get("MINICPM_EMBED_MODEL", "unknown")))
 
 
+def _endpoint_fingerprint(client, attribute):
+    # A local endpoint may have sensitive text in its URL path. Never store or
+    # return the URL itself; the digest only checks for configuration changes.
+    value = getattr(client, attribute, None)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if isinstance(value, str) else None
+
+
 def _vectors(vectors, expected: int, dimension: int | None = None):
     if not isinstance(vectors, list) or len(vectors) != expected:
         raise ToolError("Embedding 服务返回数量不正确，原索引未修改。")
@@ -195,6 +204,7 @@ def index_folder(
     max_pages=20,
     ocr=True,
     replace=False,
+    incremental=False,
     progress: Callable[[str], None] | None = None,
 ) -> dict:
     """Build off to the side; publish only after all extraction/embedding succeeds."""
@@ -213,23 +223,59 @@ def index_folder(
         raise ToolError("索引路径不能是符号链接。")
     if index.exists() and not replace:
         raise ToolError("索引已存在；检查路径后使用 --replace 重建。")
+    if incremental and (not replace or not index.exists()):
+        raise ToolError("增量更新需要已有索引，并同时指定 --replace --incremental。")
     existing_identity = (
         _existing_index_identity(index, root) if replace and index.exists() else None
     )
     client = client or LocalClient.from_env()
+    settings = {
+        "extraction_revision": EXTRACTION_REVISION,
+        "mode": mode,
+        "max_pages": max_pages,
+        "ocr_enabled": ocr,
+        "ocr_model": getattr(client, "ocr_model", None) if ocr else None,
+        "ocr_endpoint_sha256": _endpoint_fingerprint(client, "ocr_url") if ocr else None,
+        "embedding_model": _embedding_model(client) if mode == "semantic" else None,
+        "embedding_endpoint_sha256": _endpoint_fingerprint(client, "embedding_url") if mode == "semantic" else None,
+    }
     index.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{index.name}.", dir=index.parent)
     os.close(fd)
     temporary = Path(temporary)
-    files = rows = scanned_pages = 0
+    files = rows = scanned_pages = reused_files = 0
     fingerprints = {}
     dimension = None
-    db = sqlite3.connect(temporary)
+    db = sqlite3.connect(temporary, uri=True)
     try:
         db.executescript("""CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, page INTEGER,
         body TEXT NOT NULL, source TEXT NOT NULL, vector TEXT);""")
         db.execute(f"PRAGMA application_id = {INDEX_APPLICATION_ID}")
+
+        previous_fingerprints = {}
+        can_reuse = False
+        if incremental:
+            db.execute("ATTACH DATABASE ? AS old_index", (f"{index.resolve().as_uri()}?mode=ro&immutable=1",))
+            old_metadata = {
+                k: json.loads(v) for k, v in db.execute("SELECT key,value FROM old_index.metadata")
+            }
+            previous_fingerprints = old_metadata.get("file_fingerprints")
+            can_reuse = (
+                isinstance(previous_fingerprints, dict)
+                and all(key in old_metadata and old_metadata[key] == value for key, value in settings.items())
+                and (mode == "keyword" or type(old_metadata.get("dimension")) is int
+                     and old_metadata["dimension"] > 0)
+            )
+            if can_reuse:
+                # A compact temporary path index prevents scanning all old chunks
+                # once per file. Only ids and paths are duplicated, not contents.
+                db.execute("CREATE TEMP TABLE previous_chunks (path TEXT, chunk_id INTEGER)")
+                db.execute("INSERT INTO previous_chunks SELECT path,id FROM old_index.chunks")
+                db.execute("CREATE INDEX previous_chunks_path ON previous_chunks(path)")
+            else:
+                progress("旧索引缺少兼容的文件状态或设置已变化，本次完整重建。")
+                previous_fingerprints = {}
 
         def handle_walk_error(exc: OSError) -> None:
             # os.walk silently skips inaccessible directories unless onerror is set.
@@ -259,6 +305,48 @@ def index_folder(
                 before = path.stat()
                 if before.st_size > 100 * 1024 * 1024:
                     raise ToolError(f"文件超过 100 MiB 限制：{path.name}")
+                saved = previous_fingerprints.get(str(resolved))
+                reusable = (
+                    can_reuse and isinstance(saved, list) and len(saved) == 5
+                    and all(type(value) is int for value in saved)
+                    and saved == list(_file_identity(before))
+                )
+                if reusable:
+                    progress(f"复用 {path.relative_to(root)}")
+                    ocr_pages = set()
+                    previous = db.execute(
+                        "SELECT c.page,c.body,c.source,c.vector FROM previous_chunks p "
+                        "JOIN old_index.chunks c ON c.id=p.chunk_id WHERE p.path=? ORDER BY c.id",
+                        (str(resolved),),
+                    )
+                    for page, body, source, encoded in previous:
+                        if not isinstance(body, str) or source not in {"text", "ocr"} or (
+                            page is not None and (type(page) is not int or page < 1)
+                        ):
+                            raise ToolError("旧索引内容无效；请使用 --replace 完整重建。")
+                        if mode == "semantic":
+                            try:
+                                vector = json.loads(encoded)
+                                _vectors([vector], 1, old_metadata["dimension"])
+                                dimension = _vectors([vector], 1, dimension)
+                            except (TypeError, ValueError) as exc:
+                                raise ToolError("旧索引向量无效；请使用 --replace 完整重建。") from exc
+                        elif encoded is not None:
+                            raise ToolError("旧关键词索引内容无效；请使用 --replace 完整重建。")
+                        db.execute(
+                            "INSERT INTO chunks(path,page,body,source,vector) VALUES(?,?,?,?,?)",
+                            (str(resolved), page, body, source, encoded),
+                        )
+                        rows += 1
+                        if source == "ocr":
+                            ocr_pages.add(page)
+                    scanned_pages += len(ocr_pages)
+                    if path.is_symlink() or _file_identity(path.stat()) != _file_identity(before):
+                        raise ToolError(f"资料在索引期间发生变化：{path.name}；请重试，原索引未修改。")
+                    fingerprints[str(resolved)] = list(_file_identity(before))
+                    files += 1
+                    reused_files += 1
+                    continue
                 progress(f"索引 {path.relative_to(root)}")
                 if path.suffix.lower() == ".pdf":
                     pages = _pdf_pages(path, max_pages, client, ocr, progress)
@@ -297,16 +385,25 @@ def index_folder(
                 files += 1
         if not rows:
             raise ToolError("未提取到可索引文本；检查文件类型、PDF 页数及 OCR 配置。")
+        # Recheck every source after all work, not just immediately after its
+        # own extraction/reuse: another file may have changed while processing.
+        for source_path, fingerprint in fingerprints.items():
+            source = Path(source_path)
+            try:
+                if (source.is_symlink() or source.resolve() != source
+                        or list(_file_identity(source.stat())) != fingerprint):
+                    raise OSError("source changed")
+            except OSError as exc:
+                raise ToolError(f"资料在索引期间发生变化：{source.name}；请重试，原索引未修改。") from exc
         metadata = {
             "version": 1,
             "root": str(root),
-            "mode": mode,
+            **settings,
             "files": files,
             "chunks": rows,
             "ocr_pages": scanned_pages,
-            "max_pages": max_pages,
-            "embedding_model": _embedding_model(client) if mode == "semantic" else None,
             "dimension": dimension,
+            "reused_files": reused_files,
         }
         db.executemany(
             "INSERT INTO metadata VALUES(?,?)", [(k, json.dumps(v)) for k, v in metadata.items()]
@@ -483,6 +580,7 @@ def _index_command(args):
         max_pages=args.max_pages,
         ocr=not args.no_ocr,
         replace=args.replace,
+        incremental=args.incremental,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -534,6 +632,7 @@ def register(subparsers):
     build.add_argument("--max-pages", type=int, default=20)
     build.add_argument("--no-ocr", action="store_true")
     build.add_argument("--replace", action="store_true")
+    build.add_argument("--incremental", action="store_true", help="与 --replace 同用，复用设置兼容且未变化的文件")
     build.set_defaults(func=_index_command)
     query = commands.add_parser("query", help="检索并返回路径、页码、摘录")
     query.add_argument("query")
