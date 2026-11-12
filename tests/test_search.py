@@ -84,6 +84,52 @@ def test_semantic_query_checks_embedding_endpoint_and_keyword_still_works(corpus
     assert "private-original" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("mismatch", ["model", "endpoint", "invalid_index_endpoint"])
+def test_incompatible_semantic_index_rejects_before_rewrite_or_embedding(corpus, mismatch):
+    root, index = corpus
+    original = FakeClient()
+    original.embedding_url = "http://127.0.0.1:12001/v1"
+    index_folder(root, index, client=original)
+
+    class NoRequests(FakeClient):
+        def chat(self, *args, **kwargs):
+            pytest.fail("query rewrite must not run for an incompatible index")
+
+        def embed(self, *args, **kwargs):
+            pytest.fail("embedding must not run for an incompatible index")
+
+    changed = NoRequests()
+    changed.embedding_url = original.embedding_url
+    if mismatch == "model":
+        changed.embedding_model = "different-model"
+    elif mismatch == "endpoint":
+        changed.embedding_url = "http://127.0.0.1:12002/v1"
+    else:
+        with sqlite3.connect(index) as db:
+            db.execute("UPDATE metadata SET value=? WHERE key='embedding_endpoint_sha256'", ('"invalid"',))
+    with pytest.raises(ToolError, match="模型与索引不一致|服务与建索引时不同|服务标识无效"):
+        search_index(index, "biology", client=changed, rewrite=True)
+
+
+def test_keyword_rewrite_on_semantic_index_does_not_require_embedding_match(corpus):
+    root, index = corpus
+    original = FakeClient()
+    original.embedding_url = "http://127.0.0.1:12001/v1"
+    index_folder(root, index, client=original)
+
+    class RewriteOnly(FakeClient):
+        embedding_model = "different-model"
+        embedding_url = "http://127.0.0.1:12002/v1"
+
+        def chat(self, *args, **kwargs):
+            return "biology"
+
+        def embed(self, *args, **kwargs):
+            pytest.fail("keyword mode should not call the embedding backend")
+
+    assert search_index(index, "whale", client=RewriteOnly(), mode="keyword", rewrite=True)[0].path.endswith("marine.md")
+
+
 @pytest.mark.parametrize("saved", [None, "missing"])
 def test_legacy_index_without_endpoint_warns_but_remains_queryable(corpus, capsys, saved):
     root, index = corpus

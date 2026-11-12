@@ -37,6 +37,8 @@ bash script/serve_models.sh
 
 `mcpm doctor` 仍向配置的完整本地 API 地址请求模型列表，但展示时会隐藏非标准 API 路径，避免路径中可能包含的敏感信息出现在诊断输出中；常见的 `/v1` 会正常显示。
 
+诊断分别校验文本、OCR 和 embedding 配置；单个地址无效时仍检查其他有效服务。未单独设置 OCR 或 embedding 地址时，它们继承文本地址；共享超时设置无效则三项都会提示。任一项失败或模型名称未匹配时，命令以非零状态退出。
+
 注册时生成的 Modelfile 位于独立私有临时目录，命令结束后删除；不会覆盖 `.local/modelfiles/` 中已有文件或跟随同名符号链接。注册本身仍会创建或更新目标 Ollama 服务上的指定模型名称。
 
 Whisper 不注册到 Ollama，运行音频命令时传 `--whisper-model .local/whisper-tiny`，完整命令见 [audio.md](audio.md)。tiny 是便于验证流水线的小模型，不能据此推断长中文课程录音的转写质量。

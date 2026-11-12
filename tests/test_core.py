@@ -153,6 +153,38 @@ def test_safari_timestamp(tmp_path):
     assert records[0]["time"] == "08:00"
 
 
+@pytest.mark.parametrize("browser", ["chrome", "safari"])
+def test_fall_back_day_disambiguates_repeated_hour_and_includes_full_day(tmp_path, browser):
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("America/New_York")
+    day = dt.date(2026, 11, 1)
+    start = dt.datetime(2026, 11, 1, tzinfo=zone)
+    moments = [
+        start,
+        dt.datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=0),
+        dt.datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=1),
+        dt.datetime(2026, 11, 1, 23, 59, tzinfo=zone),
+        dt.datetime(2026, 11, 2, tzinfo=zone),
+    ]
+    path = tmp_path / "History"
+    with sqlite3.connect(path) as db:
+        if browser == "chrome":
+            db.executescript("CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); CREATE TABLE visits(url INTEGER,visit_time INTEGER);")
+        else:
+            db.executescript("CREATE TABLE history_items(id INTEGER,url TEXT); CREATE TABLE history_visits(history_item INTEGER,title TEXT,visit_time REAL);")
+        for number, moment in enumerate(moments, 1):
+            url = f"https://example.com/{number}"
+            if browser == "chrome":
+                db.execute("INSERT INTO urls VALUES(?,?,?)", (number, str(number), url))
+                db.execute("INSERT INTO visits VALUES(?,?)", (number, int((moment.timestamp() + 11644473600) * 1_000_000)))
+            else:
+                db.execute("INSERT INTO history_items VALUES(?,?)", (number, url))
+                db.execute("INSERT INTO history_visits VALUES(?,?,?)", (number, str(number), moment.timestamp() - 978307200))
+    records = read_history(path, browser, day, "America/New_York")
+    assert [record["time"] for record in records] == ["00:00", "01:30 -0400", "01:30 -0500", "23:59"]
+
+
 def test_chat_disables_thinking_and_rejects_truncation(monkeypatch):
     client = LocalClient()
     captured = {}

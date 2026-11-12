@@ -1,6 +1,7 @@
 """Local audio -> timestamped transcript -> evidence-linked meeting notes."""
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -482,6 +483,38 @@ def render_notes(notes: dict, source_name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _publish_summary(run: Path, text: str) -> None:
+    """Publish without overwriting; clean up our partial file on interruption."""
+    fd, temp_name = tempfile.mkstemp(prefix=".summary-", dir=run)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        destination = run / "summary.md"
+        try:
+            os.link(temp, destination)
+        except OSError as exc:
+            # exFAT and some network volumes do not support hard links. Use
+            # exclusive creation there; never replace a pre-existing summary.
+            if exc.errno not in {errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EXDEV, errno.EINVAL}:
+                raise
+            out_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            identity = os.fstat(out_fd)
+            try:
+                with os.fdopen(out_fd, "w", encoding="utf-8") as stream:
+                    stream.write(text)
+            except BaseException:
+                try:
+                    current = destination.lstat()
+                    if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                        destination.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def handle(args) -> int:
     if args.input and args.transcript_json:
         raise ToolError("音频文件与 --transcript-json 只能选一个。")
@@ -512,18 +545,23 @@ def handle(args) -> int:
     write_new(run / "transcript.json", json.dumps({"segments": [vars(segment) for segment in segments]}, ensure_ascii=False, indent=2) + "\n")
     print(f"转写已保存：{run / 'transcript.txt'}", file=sys.stderr)
     if not args.no_summary:
+        # The same recovery command applies whether inference fails or the user
+        # interrupts a long summary; the transcript has already been saved.
+        retry = shlex.join([
+            sys.executable, "-m", "minicpm_tools", "audio",
+            "--transcript-json", str(run / "transcript.json"),
+            "--output-dir", str(args.output_dir), "--chunk-chars", str(args.chunk_chars),
+        ])
         try:
             notes = summarize(segments, LocalClient.from_env(), args.chunk_chars)
-            write_new(run / "summary.md", render_notes(notes, source.name))
+            _publish_summary(run, render_notes(notes, source.name))
         except ToolError as exc:
-            # Use the interpreter that is actually running the tool: `mcpm`
-            # may not be on PATH when the project venv was not activated.
-            retry = shlex.join([
-                sys.executable, "-m", "minicpm_tools", "audio",
-                "--transcript-json", str(run / "transcript.json"),
-                "--output-dir", str(args.output_dir), "--chunk-chars", str(args.chunk_chars),
-            ])
             raise ToolError(f"{exc}\n可重试：{retry}") from exc
+        except OSError as exc:
+            raise ToolError(f"纪要保存失败（{type(exc).__name__}），转写已保留。\n可重试：{retry}") from exc
+        except KeyboardInterrupt:
+            print(f"摘要已中断，转写已保留。可重试：{retry}", file=sys.stderr)
+            raise
     print(run)
     return 0
 

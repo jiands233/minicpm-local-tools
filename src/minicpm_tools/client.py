@@ -64,16 +64,21 @@ class LocalClient:
             raise ToolError("模型超时秒数必须为正数。")
 
     @classmethod
+    def env_options(cls):
+        """Return the shared raw environment configuration before validation."""
+        return {
+            "base_url": os.getenv("MINICPM_BASE_URL", "http://127.0.0.1:11434/v1"),
+            "model": os.getenv("MINICPM_MODEL", "minicpm5-2b"),
+            "ocr_url": os.getenv("MINICPM_OCR_URL"),
+            "ocr_model": os.getenv("MINICPM_OCR_MODEL", "minicpm-ocr"),
+            "embedding_url": os.getenv("MINICPM_EMBED_URL"),
+            "embedding_model": os.getenv("MINICPM_EMBED_MODEL", "bge-m3"),
+            "timeout": os.getenv("MINICPM_TIMEOUT", "180"),
+        }
+
+    @classmethod
     def from_env(cls):
-        return cls(
-            base_url=os.getenv("MINICPM_BASE_URL", "http://127.0.0.1:11434/v1"),
-            model=os.getenv("MINICPM_MODEL", "minicpm5-2b"),
-            ocr_url=os.getenv("MINICPM_OCR_URL"),
-            ocr_model=os.getenv("MINICPM_OCR_MODEL", "minicpm-ocr"),
-            embedding_url=os.getenv("MINICPM_EMBED_URL"),
-            embedding_model=os.getenv("MINICPM_EMBED_MODEL", "bge-m3"),
-            timeout=os.getenv("MINICPM_TIMEOUT", "180"),
-        )
+        return cls(**cls.env_options())
 
     def _request(self, base, route, payload=None):
         try:

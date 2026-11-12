@@ -422,6 +422,122 @@ def test_summary_retry_uses_current_python_and_preserves_chunk_size(tmp_path, mo
     assert (run / 'transcript.json').exists() and not (run / 'summary.md').exists()
 
 
+def test_interrupted_summary_reports_retry_and_keeps_transcript(tmp_path, monkeypatch, capsys):
+    from minicpm_tools import audio
+
+    source = tmp_path / 'input with spaces.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 2, 'text': '保留原文'}]}))
+    output = tmp_path / 'output with spaces'
+    args = argparse.Namespace(input=None, transcript_json=source, chunk_chars=750,
+                              output_dir=output, no_summary=False)
+
+    class InterruptedClient:
+        def chat(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(audio.LocalClient, 'from_env', lambda: InterruptedClient())
+    with pytest.raises(KeyboardInterrupt):
+        handle(args)
+    run, = output.iterdir()
+    retry = capsys.readouterr().err.split('可重试：', 1)[1].strip()
+    assert shlex.split(retry) == [sys.executable, '-m', 'minicpm_tools', 'audio',
+                                  '--transcript-json', str(run / 'transcript.json'),
+                                  '--output-dir', str(output), '--chunk-chars', '750']
+    assert (run / 'transcript.json').is_file()
+    assert not (run / 'summary.md').exists()
+
+
+def test_interrupted_summary_publication_leaves_no_partial_result(tmp_path, monkeypatch, capsys):
+    from minicpm_tools import audio
+
+    source = tmp_path / 'input.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 2, 'text': '原文'}]}))
+    output = tmp_path / 'out'
+    args = argparse.Namespace(input=None, transcript_json=source, chunk_chars=5000,
+                              output_dir=output, no_summary=False)
+    monkeypatch.setattr(audio.LocalClient, 'from_env', lambda: object())
+    monkeypatch.setattr(audio, 'summarize', lambda *args: {})
+    monkeypatch.setattr(audio, 'render_notes', lambda *args: '完整纪要')
+    monkeypatch.setattr(audio.os, 'link', lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        handle(args)
+    run, = output.iterdir()
+    assert (run / 'transcript.json').is_file()
+    assert not (run / 'summary.md').exists()
+    assert not list(run.glob('.summary-*'))
+    assert '可重试：' in capsys.readouterr().err
+
+
+def test_summary_falls_back_if_hard_links_are_unavailable(tmp_path, monkeypatch):
+    import errno
+
+    from minicpm_tools import audio
+
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, 'unsupported')
+
+    monkeypatch.setattr(audio.os, 'link', unsupported)
+    audio._publish_summary(tmp_path, '完整纪要')
+    assert (tmp_path / 'summary.md').read_text() == '完整纪要'
+    with pytest.raises(FileExistsError):
+        audio._publish_summary(tmp_path, '不能覆盖')
+    assert (tmp_path / 'summary.md').read_text() == '完整纪要'
+    assert not list(tmp_path.glob('.summary-*'))
+
+
+@pytest.mark.parametrize('failure', [KeyboardInterrupt, OSError])
+def test_summary_fallback_removes_its_partial_file_on_failure(tmp_path, monkeypatch, failure):
+    import errno
+
+    from minicpm_tools import audio
+
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, 'unsupported')
+
+    real_fdopen = audio.os.fdopen
+    class InterruptingWriter:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+        def write(self, value):
+            self.stream.write(value[:1])
+            raise failure
+
+    calls = 0
+    def fdopen(fd, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        stream = real_fdopen(fd, *args, **kwargs)
+        return InterruptingWriter(stream) if calls == 2 else stream
+
+    monkeypatch.setattr(audio.os, 'link', unsupported)
+    monkeypatch.setattr(audio.os, 'fdopen', fdopen)
+    with pytest.raises(failure):
+        audio._publish_summary(tmp_path, '完整纪要')
+    assert not (tmp_path / 'summary.md').exists()
+    assert not list(tmp_path.glob('.summary-*'))
+
+
+def test_interrupted_summary_cli_keeps_exit_code_130(tmp_path, monkeypatch, capsys):
+    from minicpm_tools import audio, cli
+
+    source = tmp_path / 'input.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 2, 'text': '原文'}]}))
+    output = tmp_path / 'out'
+    monkeypatch.setattr(sys, 'argv', ['mcpm', 'audio', '--transcript-json', str(source),
+                                      '--output-dir', str(output)])
+    monkeypatch.setattr(audio.LocalClient, 'from_env', lambda: object())
+    monkeypatch.setattr(audio, 'summarize', lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()))
+    assert cli.main() == 130
+    assert '可重试：' in capsys.readouterr().err
+    run, = output.iterdir()
+    assert (run / 'transcript.json').exists() and not (run / 'summary.md').exists()
+
+
 @pytest.mark.parametrize('field,bad_value', [
     ('key_points', None), ('questions', 'missing'), ('actions', None),
 ])

@@ -331,9 +331,12 @@ def read_history(
         if identity in seen:
             seen[identity]["visits"] += 1
             continue
+        local_time = dt.datetime.fromtimestamp(timestamp / scale - epoch, zone)
+        # DST fall-back repeats a local hour; preserve which instant was visited.
+        ambiguous = local_time.replace(fold=0).utcoffset() != local_time.replace(fold=1).utcoffset()
         entry = {
             "id": len(result) + 1,
-            "time": dt.datetime.fromtimestamp(timestamp / scale - epoch, zone).strftime("%H:%M"),
+            "time": local_time.strftime("%H:%M %z" if ambiguous else "%H:%M"),
             "title": str(title or urlsplit(url).hostname).replace("\n", " ")[:300],
             "url": url,
             "domain": urlsplit(url).hostname,

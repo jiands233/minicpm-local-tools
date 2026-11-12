@@ -38,14 +38,18 @@ def _doctor_address(url):
 def run_doctor(args):
     from .client import LocalClient
 
-    client = LocalClient.from_env()
+    config = LocalClient.env_options()
     failed = False
     for label, url, model in (
-        ("文本", client.base_url, client.model),
-        ("OCR", client.ocr_url, client.ocr_model),
-        ("Embedding", client.embedding_url, client.embedding_model),
+        ("文本", config["base_url"], config["model"]),
+        ("OCR", config["ocr_url"] or config["base_url"], config["ocr_model"]),
+        ("Embedding", config["embedding_url"] or config["base_url"], config["embedding_model"]),
     ):
         try:
+            # Validate each service independently, retaining the same shared
+            # timeout and local-only address rules as normal client requests.
+            client = LocalClient(base_url=url, model=model, timeout=config["timeout"])
+            url = client.base_url
             data = client._request(url, "/models")
             rows = data.get("data") if isinstance(data, dict) else None
             if not isinstance(rows, list) or any(
