@@ -108,7 +108,36 @@ def _load_audio(path: Path):
     return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def transcribe(path: Path, model: Path, language: str | None = None, *, audio_chunk_seconds: int | None = None) -> list[Segment]:
+def _silence_cut_frame(data: bytes) -> int | None:
+    """Find a quiet 300 ms window near the end, or retain the fixed cut.
+
+    This is a low-energy heuristic, not voice activity detection. Require both
+    a low absolute level and a large contrast against the surrounding audio.
+    """
+    import numpy as np
+
+    rate = 16000
+    window = int(rate * 0.3)
+    step = int(rate * 0.05)
+    samples = np.frombuffer(data, dtype="<i2")
+    tail = samples[max(0, len(samples) - 2 * rate):].astype(np.float32) / 32768.0
+    if len(tail) < window:
+        return None
+    levels = [
+        (start, float(np.sqrt(np.mean(tail[start:start + window] ** 2))))
+        for start in range(0, len(tail) - window + 1, step)
+    ]
+    peak = max(level for _, level in levels)
+    if peak < 0.02:
+        return None
+    threshold = min(0.01, peak * 0.15)
+    for start, level in reversed(levels):
+        if level < threshold:
+            return len(samples) - len(tail) + start + window // 2
+    return None
+
+
+def transcribe(path: Path, model: Path, language: str | None = None, *, audio_chunk_seconds: int | None = None, audio_silence_cut: bool = False) -> list[Segment]:
     if not path.is_file():
         raise ToolError(f"音频文件不存在：{path}")
     model = model.expanduser().resolve()
@@ -119,6 +148,8 @@ def transcribe(path: Path, model: Path, language: str | None = None, *, audio_ch
         or audio_chunk_seconds > sys.maxsize // 32000
     ):
         raise ToolError("--audio-chunk-seconds 必须是至少 30 的整数秒。")
+    if audio_silence_cut and audio_chunk_seconds is None:
+        raise ToolError("--audio-silence-cut 需要同时指定 --audio-chunk-seconds。")
     # Even a future library change must not silently download during inference.
     os.environ["HF_HUB_OFFLINE"] = "1"
     try:
@@ -134,27 +165,38 @@ def transcribe(path: Path, model: Path, language: str | None = None, *, audio_ch
                 total = source.getnframes()
                 per_chunk = audio_chunk_seconds * 16000
                 count = (total + per_chunk - 1) // per_chunk
-                for index in range(count):
-                    expected = min(per_chunk, total - index * per_chunk)
+                index = 0
+                position = 0
+                while position < total:
+                    expected = min(per_chunk, total - position)
                     data = source.readframes(expected)
+                    label = str(index + 1) if audio_silence_cut else f"{index + 1}/{count}"
                     if len(data) != expected * 2:
-                        raise ToolError(f"音频第 {index + 1}/{count} 段数据不完整，未生成转写。")
-                    print(f"本地 Whisper 音频分段 {index + 1}/{count}…", file=sys.stderr)
+                        raise ToolError(f"音频第 {label} 段数据不完整，未生成转写。")
+                    if audio_silence_cut and total - position > per_chunk:
+                        cut = _silence_cut_frame(data)
+                        if cut is not None:
+                            expected = cut
+                            data = data[:cut * 2]
+                            source.setpos(position + cut)
+                    print(f"本地 Whisper 音频分段 {label}…", file=sys.stderr)
                     samples = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
                     try:
                         result = mlx_whisper.transcribe(samples, path_or_hf_repo=str(model), language=language, verbose=False, fp16=True, condition_on_previous_text=False)
                     except Exception as exc:
-                        raise ToolError(f"本地 Whisper 第 {index + 1}/{count} 段转写失败（{type(exc).__name__}）；未生成不完整转写。") from exc
-                    offset = index * per_chunk / 16000
+                        raise ToolError(f"本地 Whisper 第 {label} 段转写失败（{type(exc).__name__}）；未生成不完整转写。") from exc
+                    offset = position / 16000
                     for segment in parse_segments(result, allow_empty=True):
                         duration = expected / 16000
                         if segment.start >= duration or segment.end > duration + 0.1 + 1e-9:
-                            raise ToolError(f"本地 Whisper 第 {index + 1}/{count} 段返回超出音频范围的时间戳；未生成不完整转写。")
+                            raise ToolError(f"本地 Whisper 第 {label} 段返回超出音频范围的时间戳；未生成不完整转写。")
                         end = segment.end
                         if end > duration:
-                            print(f"第 {index + 1}/{count} 段时间戳略超音频末尾，已截到实际末尾。", file=sys.stderr)
+                            print(f"第 {label} 段时间戳略超音频末尾，已截到实际末尾。", file=sys.stderr)
                             end = duration
                         segments.append(Segment(segment.start + offset, end + offset, segment.text))
+                    position += expected
+                    index += 1
             if not segments:
                 raise ToolError("没有识别到语音；未生成空白纪要。")
             return segments
@@ -437,6 +479,8 @@ def handle(args) -> int:
         raise ToolError("请提供音频文件，或 --transcript-json。")
     if args.transcript_json and getattr(args, "audio_chunk_seconds", None) is not None:
         raise ToolError("--audio-chunk-seconds 只用于音频输入，不能与 --transcript-json 同用。")
+    if getattr(args, "audio_silence_cut", False) and (args.transcript_json or getattr(args, "audio_chunk_seconds", None) is None):
+        raise ToolError("--audio-silence-cut 仅用于音频输入，且需要 --audio-chunk-seconds。")
     if args.chunk_chars < 500:
         raise ToolError("--chunk-chars 至少为 500。")
     source = (args.input or args.transcript_json).expanduser().resolve()
@@ -447,7 +491,7 @@ def handle(args) -> int:
         if getattr(args, "audio_chunk_seconds", None) is None:
             segments = transcribe(source, args.whisper_model, args.language)
         else:
-            segments = transcribe(source, args.whisper_model, args.language, audio_chunk_seconds=args.audio_chunk_seconds)
+            segments = transcribe(source, args.whisper_model, args.language, audio_chunk_seconds=args.audio_chunk_seconds, audio_silence_cut=getattr(args, "audio_silence_cut", False))
     else:
         segments = read_transcript(source)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -477,5 +521,6 @@ def register(subparsers):
     parser.add_argument("--output-dir", type=Path, required=True, help="输出目录，每次创建独立日期子目录")
     parser.add_argument("--no-summary", action="store_true", help="只转写，不调用摘要模型")
     parser.add_argument("--audio-chunk-seconds", type=int, help="可选：按指定秒数分段转写以降低内存，至少 30 秒；边界可能截断语句")
+    parser.add_argument("--audio-silence-cut", action="store_true", help="可选：分段时在切点前 2 秒内优先选择安静窗口，否则固定切分")
     parser.add_argument("--chunk-chars", type=int, default=5000, help="每块最大转写字符数，默认 5000")
     parser.set_defaults(func=handle)

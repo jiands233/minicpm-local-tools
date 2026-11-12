@@ -3,6 +3,7 @@ import json
 import shutil
 import sys
 import wave
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,7 +170,8 @@ def test_chunked_transcription_offsets_timestamps_and_allows_silent_chunks(tmp_p
     assert '音频分段 3/3' in capsys.readouterr().err
 
 
-def test_chunked_failure_never_writes_partial_transcript(tmp_path, monkeypatch):
+@pytest.mark.parametrize('silence_cut', [False, True])
+def test_chunked_failure_never_writes_partial_transcript(tmp_path, monkeypatch, silence_cut):
     pytest.importorskip('numpy')
     from minicpm_tools import audio
     source, model = _chunked_test_files(tmp_path, seconds=31)
@@ -183,8 +185,10 @@ def test_chunked_failure_never_writes_partial_transcript(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
     out = tmp_path / 'out'
     args = argparse.Namespace(input=source, transcript_json=None, whisper_model=model, language='zh',
-                              chunk_chars=5000, audio_chunk_seconds=30, output_dir=out, no_summary=True)
-    with pytest.raises(ToolError, match='第 2/2 段转写失败'):
+                              chunk_chars=5000, audio_chunk_seconds=30, audio_silence_cut=silence_cut,
+                              output_dir=out, no_summary=True)
+    expected = '第 2 段转写失败' if silence_cut else '第 2/2 段转写失败'
+    with pytest.raises(ToolError, match=expected):
         handle(args)
     assert not out.exists()
 
@@ -207,6 +211,78 @@ def test_chunk_size_validation(tmp_path):
     source, model = _chunked_test_files(tmp_path, seconds=1)
     with pytest.raises(ToolError, match='至少 30'):
         transcribe(source, model, audio_chunk_seconds=29)
+
+
+def test_silence_cut_requires_a_clear_quiet_window():
+    np = pytest.importorskip('numpy')
+    from minicpm_tools.audio import _silence_cut_frame
+    continuous = np.full(30 * 16000, 9000, dtype='<i2')
+    assert _silence_cut_frame(continuous.tobytes()) is None
+    assert _silence_cut_frame(np.zeros_like(continuous).tobytes()) is None
+    # A brief dip cannot qualify as a 300 ms quiet interval.
+    continuous[29 * 16000:29 * 16000 + 1000] = 0
+    assert _silence_cut_frame(continuous.tobytes()) is None
+    continuous[29 * 16000:int(29.5 * 16000)] = 0
+    cut = _silence_cut_frame(continuous.tobytes())
+    assert 29 * 16000 < cut < int(29.5 * 16000)
+
+
+def test_silence_cut_covers_every_sample_and_offsets_timestamps(tmp_path, monkeypatch):
+    np = pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=60)
+    values = ((np.arange(60 * 16000 + 7, dtype=np.int64) * 29) % 20000 + 4000).astype('<i2')
+    values[29 * 16000:int(29.5 * 16000)] = 0
+    with wave.open(str(source), 'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+        wav.writeframes(values.tobytes())
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    calls = []
+    def fake_transcribe(samples, **kwargs):
+        calls.append(samples.copy())
+        return {'segments': [{'start': 0, 'end': len(samples) / 16000, 'text': 'text'}]}
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
+    segments = transcribe(source, model, 'zh', audio_chunk_seconds=30, audio_silence_cut=True)
+    assert len(calls) == 3
+    assert len(calls[0]) < 30 * 16000
+    assert np.array_equal(np.concatenate(calls), values.astype(np.float32) / 32768.0)
+    assert segments[0].start == 0
+    assert all(left.end == right.start for left, right in pairwise(segments))
+    assert segments[-1].end == pytest.approx(len(values) / 16000, abs=1e-9)
+
+
+def test_silence_cut_flag_requires_chunked_audio(tmp_path):
+    audio_path, model = _chunked_test_files(tmp_path, seconds=1)
+    with pytest.raises(ToolError, match='audio-silence-cut'):
+        transcribe(audio_path, model, audio_silence_cut=True)
+    source = tmp_path / 'input.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 1, 'text': 'text'}]}))
+    args = argparse.Namespace(input=None, transcript_json=source, audio_chunk_seconds=None,
+                              audio_silence_cut=True, chunk_chars=5000,
+                              output_dir=tmp_path / 'out', no_summary=True)
+    with pytest.raises(ToolError, match='audio-silence-cut'):
+        handle(args)
+    assert not args.output_dir.exists()
+
+
+def test_silence_cut_falls_back_and_preserves_tiny_last_piece(tmp_path, monkeypatch):
+    np = pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=60)
+    values = ((np.arange(60 * 16000 + 7, dtype=np.int64) * 29) % 20000 + 4000).astype('<i2')
+    with wave.open(str(source), 'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+        wav.writeframes(values.tobytes())
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    calls = []
+    def fake_transcribe(samples, **kwargs):
+        calls.append(samples.copy())
+        return {'segments': [{'start': 0, 'end': len(samples) / 16000, 'text': 'text'}]}
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
+    segments = transcribe(source, model, audio_chunk_seconds=30, audio_silence_cut=True)
+    assert [len(samples) for samples in calls] == [480000, 480000, 7]
+    assert np.array_equal(np.concatenate(calls), values.astype(np.float32) / 32768.0)
+    assert segments[-1].end == pytest.approx(len(values) / 16000, abs=1e-9)
 
 
 def test_chunked_rejects_timestamp_beyond_last_short_chunk(tmp_path, monkeypatch):

@@ -486,6 +486,15 @@ def search_index(
     if mode != "keyword":
         if metadata["embedding_model"] != _embedding_model(client):
             raise ToolError("当前 embedding 模型与索引不一致；切回原模型或重建索引。")
+        saved_endpoint = metadata.get("embedding_endpoint_sha256")
+        if saved_endpoint is None:
+            # Old indexes predate endpoint identity; preserve access but never
+            # imply that the currently selected backend has been verified.
+            print("索引未记录 embedding 服务标识，无法验证当前服务是否与建索引时一致；请核对或重建。", file=sys.stderr)
+        elif not isinstance(saved_endpoint, str) or not re.fullmatch(r"[0-9a-f]{64}", saved_endpoint):
+            raise ToolError("索引中的 embedding 服务标识无效，请重建索引。")
+        elif saved_endpoint != _endpoint_fingerprint(client, "embedding_url"):
+            raise ToolError("当前 embedding 服务与建索引时不同；请切回原服务或完整重建索引。")
         vectors = client.embed([query])
         _vectors(vectors, 1, metadata["dimension"])
         qvector = vectors[0]

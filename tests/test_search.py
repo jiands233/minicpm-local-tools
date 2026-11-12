@@ -63,6 +63,41 @@ def test_semantic_query_without_literal_overlap_and_model_identity(corpus):
         search_index(index, "鲸鱼", client=client)
 
 
+def test_semantic_query_checks_embedding_endpoint_and_keyword_still_works(corpus, capsys):
+    root, index = corpus
+    original = FakeClient()
+    original.embedding_url = "http://127.0.0.1:12001/v1/private-original"
+    index_folder(root, index, client=original)
+    changed = FakeClient()
+    changed.embedding_url = "http://127.0.0.1:12002/v1/private-other"
+    # A different backend can return same-sized but incompatible vectors. It
+    # must be rejected before calling it, without printing either address.
+    with pytest.raises(ToolError, match="服务与建索引时不同") as error:
+        search_index(index, "鲸鱼", client=changed)
+    assert changed.batches == []
+    assert "private-original" not in str(error.value) and "private-other" not in str(error.value)
+    assert search_index(index, "biology", client=changed, mode="keyword")[0].path.endswith("marine.md")
+    assert changed.batches == []
+    assert search_index(index, "鲸鱼", client=original)[0].path.endswith("marine.md")
+    assert "private-original" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("saved", [None, "missing"])
+def test_legacy_index_without_endpoint_warns_but_remains_queryable(corpus, capsys, saved):
+    root, index = corpus
+    client = FakeClient()
+    client.embedding_url = "http://127.0.0.1:12001/v1/private"
+    index_folder(root, index, client=client)
+    with sqlite3.connect(index) as db:
+        if saved == "missing":
+            db.execute("DELETE FROM metadata WHERE key='embedding_endpoint_sha256'")
+        else:
+            db.execute("UPDATE metadata SET value='null' WHERE key='embedding_endpoint_sha256'")
+    assert search_index(index, "鲸鱼", client=client)[0].path.endswith("marine.md")
+    warning = capsys.readouterr().err
+    assert "无法验证当前服务" in warning and "private" not in warning
+
+
 def test_keyword_mode_requires_no_model_calls(corpus):
     root, index = corpus
     client = FakeClient()
