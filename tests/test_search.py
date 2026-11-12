@@ -518,6 +518,29 @@ def test_no_results_still_warn_when_source_changed(corpus, capsys):
     assert "--replace" in result.err
 
 
+def test_empty_indexed_file_change_is_reported_and_incremental_update_finds_it(corpus, capsys):
+    root, index = corpus
+    empty = root / "draft.txt"
+    empty.write_text("", encoding="utf-8")
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    capsys.readouterr()
+    empty.write_text("The unique upcoming deadline is Jupiter.", encoding="utf-8")
+
+    # The old index has no chunk for the previously empty file; a no-hit
+    # query must still report its changed fingerprint.
+    assert search_index(index, "Jupiter", client=FakeClient()) == []
+    assert "1 个文件已变化" in capsys.readouterr().err
+
+    result = index_folder(root, index, mode="keyword", client=FakeClient(),
+                          replace=True, incremental=True)
+    assert result["reused_files"] == 2
+    capsys.readouterr()
+    hits = search_index(index, "Jupiter", client=FakeClient())
+    assert len(hits) == 1 and hits[0].path == str(empty)
+    assert hits[0].source_changed is False
+    assert "文件已变化" not in capsys.readouterr().err
+
+
 def test_incremental_reuses_unchanged_and_handles_changed_added_deleted(corpus):
     root, index = corpus
     removed = root / "deleted.md"

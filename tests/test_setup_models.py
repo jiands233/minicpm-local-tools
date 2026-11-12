@@ -99,6 +99,46 @@ def test_modelfile_uses_verified_paths_and_embedded_template(tmp_path):
         setup.modelfile({"kind": "text", "files": [item]}, tmp_path)
 
 
+@pytest.mark.parametrize("returncode", [0, 1])
+@pytest.mark.parametrize("existing_kind", ["file", "symlink"])
+def test_registration_preserves_existing_modelfile_and_cleans_temporary(
+    tmp_path, monkeypatch, returncode, existing_kind
+):
+    item = fixture_item()
+    weights = tmp_path / item["destination"]
+    weights.parent.mkdir(parents=True)
+    weights.write_bytes(b"model fixture")
+    old = tmp_path / ".local/modelfiles/text.Modelfile"
+    old.parent.mkdir()
+    target = tmp_path / "existing-user-file"
+    target.write_text("original user content", encoding="utf-8")
+    if existing_kind == "symlink":
+        old.symlink_to(target)
+    else:
+        old.write_text("original user content", encoding="utf-8")
+    seen = []
+
+    def fake_create(command, **kwargs):
+        path = Path(command[command.index("-f") + 1])
+        assert path != old and path.is_file()
+        assert str(weights) in path.read_text(encoding="utf-8")
+        seen.append(path)
+        return subprocess.CompletedProcess(command, returncode)
+
+    monkeypatch.setattr(setup, "ollama_path", lambda root: "ollama")
+    monkeypatch.setattr(setup.subprocess, "run", fake_create)
+    components = {"text": {"kind": "text", "model_name": "fixture", "files": [item]}}
+    if returncode:
+        with pytest.raises(setup.SetupError, match="registration failed"):
+            setup.register(components, ["text"], tmp_path)
+    else:
+        setup.register(components, ["text"], tmp_path)
+    assert len(seen) == 1 and not seen[0].exists()
+    assert old.read_text(encoding="utf-8") == "original user content"
+    assert target.read_text(encoding="utf-8") == "original user content"
+    assert old.is_symlink() == (existing_kind == "symlink")
+
+
 def runtime_component(root, members):
     archive = root / ".local/runtime/ollama-darwin.tgz"
     archive.parent.mkdir(parents=True)

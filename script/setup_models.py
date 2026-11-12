@@ -178,22 +178,23 @@ def register(components, selected, root=ROOT):
         if not component.get("model_name"):
             raise SetupError(f"{key} is not an Ollama model; it does not require register.")
         text = modelfile(component, root)
-        directory = root / ".local/modelfiles"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{key}.Modelfile"
-        path.write_text(text, encoding="utf-8")
-        print(
-            f"Registering verified {key} as {component['model_name']} on 127.0.0.1:11434",
-            flush=True,
-        )
-        # FROM uses verified local files, so create never pulls weights remotely.
-        result = subprocess.run(
-            [binary, "create", component["model_name"], "-f", str(path)], env=env, check=False
-        )
-        if result.returncode:
-            raise SetupError(
-                f"Ollama registration failed for {key}; start script/serve_models.sh first."
+        # Never overwrite a user's previous Modelfile (or follow a symlink at
+        # that path). Ollama reads this private file during the create call.
+        with tempfile.TemporaryDirectory(prefix="mcpm-modelfile-", dir=root / ".local") as temp:
+            path = Path(temp) / "Modelfile"
+            path.write_text(text, encoding="utf-8")
+            print(
+                f"Registering verified {key} as {component['model_name']} on 127.0.0.1:11434",
+                flush=True,
             )
+            # FROM uses verified local files, so create never pulls weights remotely.
+            result = subprocess.run(
+                [binary, "create", component["model_name"], "-f", str(path)], env=env, check=False
+            )
+            if result.returncode:
+                raise SetupError(
+                    f"Ollama registration failed for {key}; start script/serve_models.sh first."
+                )
 
 
 def same_file_bytes(expected, actual):

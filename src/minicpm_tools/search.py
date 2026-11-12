@@ -530,6 +530,26 @@ def search_index(
             semantic = _cosine(qvector, document_vector)
             score = semantic if mode == "semantic" else 0.8 * semantic + 0.2 * lexical
         scored.append(Hit(path, page, body, score, source, source_changed=source_status[path]))
+    # Some indexed sources have no chunks, such as an empty text file or a
+    # textless PDF indexed with --no-ocr. They may later gain searchable text;
+    # checking only chunk paths would silently report an empty result as fresh.
+    for path, saved in (fingerprints or {}).items():
+        if path in source_status:
+            continue
+        actual = Path(path)
+        if actual.is_symlink() or not actual.is_file() or not actual.resolve().is_relative_to(root):
+            continue
+        if saved is not None and (
+            not isinstance(saved, list)
+            or len(saved) != 5
+            or not all(type(value) is int for value in saved)
+        ):
+            raise ToolError("索引中的文件状态无效，请重建索引。")
+        try:
+            current = list(_file_identity(actual.stat()))
+        except OSError:
+            continue
+        source_status[path] = None if saved is None else saved != current
     # Warn even when no old excerpt matches: new contents are not indexed yet.
     changed = sum(status is True for status in source_status.values())
     unknown = sum(status is None for status in source_status.values())

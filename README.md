@@ -51,6 +51,8 @@ uv sync --extra dev --extra pdf --extra audio
 
 # 3. 本地录音 -> 转写 + 纪要（需已下载 Whisper 权重）
 .venv/bin/mcpm audio /path/to/recording.m4a --whisper-model .local/whisper-tiny --output-dir outputs/audio
+# 较长音频可选分段转写；切分边界可能截断语句
+.venv/bin/mcpm audio /path/to/recording.m4a --whisper-model .local/whisper-tiny --audio-chunk-seconds 300 --output-dir outputs/audio
 # 无音频时，也可以试用明确标注为合成的演示转写
 .venv/bin/mcpm audio --transcript-json examples/audio-transcript.json --output-dir outputs/audio
 

@@ -35,6 +35,8 @@ bash script/serve_models.sh
 
 `register` 只读取已下载、校验通过的本地文件，并在本地 Ollama 中创建/更新这里列出的模型名称。它不修改个人 Ollama 配置，不注册系统后台服务；`serve_models.sh` 将模型存储定向到本项目 `.local/models`。如 11434 已有你自己的 Ollama 服务，先确认该服务的模型存储归属再注册；CLI 的客户端环境变量无法改变一个已经运行的服务的存储目录。
 
+注册时生成的 Modelfile 位于独立私有临时目录，命令结束后删除；不会覆盖 `.local/modelfiles/` 中已有文件或跟随同名符号链接。注册本身仍会创建或更新目标 Ollama 服务上的指定模型名称。
+
 Whisper 不注册到 Ollama，运行音频命令时传 `--whisper-model .local/whisper-tiny`，完整命令见 [audio.md](audio.md)。tiny 是便于验证流水线的小模型，不能据此推断长中文课程录音的转写质量。
 
 可选的 MiniCPM5-1B 下载约 688 MB：

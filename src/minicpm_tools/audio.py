@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import wave
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -34,7 +35,7 @@ def timestamp(seconds: float) -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}"
 
 
-def parse_segments(payload: object) -> list[Segment]:
+def parse_segments(payload: object, *, allow_empty: bool = False) -> list[Segment]:
     rows = payload.get("segments") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
         raise ToolError('转写 JSON 必须包含 segments 数组，每项为 start/end/text。')
@@ -53,7 +54,7 @@ def parse_segments(payload: object) -> list[Segment]:
         previous_start = start
         if text.strip():
             result.append(Segment(start, end, text.strip()))
-    if not result:
+    if not result and not allow_empty:
         raise ToolError("没有识别到语音；未生成空白纪要。")
     return result
 
@@ -65,10 +66,9 @@ def read_transcript(path: Path) -> list[Segment]:
         raise ToolError(f"无法读取转写 JSON：{exc}") from exc
 
 
-def _load_audio(path: Path):
-    """Decode locally to the 16 kHz mono float array accepted by MLX Whisper."""
-    import numpy as np
-
+@contextmanager
+def _decoded_audio(path: Path):
+    """Provide a local, temporary 16 kHz mono WAV, deleting it on every exit."""
     with tempfile.TemporaryDirectory(prefix="minicpm-audio-") as work:
         decoded = Path(work) / "decoded.wav"
         if shutil.which("afconvert"):
@@ -79,27 +79,46 @@ def _load_audio(path: Path):
             command = None
             decoded = path
         if command:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=600, check=False)
+            try:
+                completed = subprocess.run(command, capture_output=True, text=True, timeout=600, check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise ToolError("音频解码超过 10 分钟；可先手动分割录音或检查音频转换器后重试。") from exc
             if completed.returncode:
                 raise ToolError("音频解码失败；请检查文件是否有效，或先转换为 16 kHz 单声道 PCM WAV。")
         try:
             with wave.open(str(decoded), "rb") as source:
                 if source.getframerate() != 16000 or source.getnchannels() != 1 or source.getsampwidth() != 2:
-                    raise ToolError("没有音频转换器：请提供 16 kHz 单声道、16-bit PCM WAV，或安装 ffmpeg。")
-                audio = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+                    raise ToolError("请提供 16 kHz 单声道、16-bit PCM WAV，或检查音频转换器。")
+                if source.getnframes() == 0:
+                    raise ToolError("音频为空。")
+                yield source
         except (wave.Error, EOFError) as exc:
             raise ToolError("无法读取音频；支持的格式由本机 afconvert / ffmpeg 决定。") from exc
-    if audio.size == 0:
-        raise ToolError("音频为空。")
-    return audio
 
 
-def transcribe(path: Path, model: Path, language: str | None = None) -> list[Segment]:
+def _load_audio(path: Path):
+    """Decode locally to the 16 kHz mono float array accepted by MLX Whisper."""
+    import numpy as np
+
+    with _decoded_audio(path) as source:
+        expected = source.getnframes()
+        frames = source.readframes(expected)
+        if len(frames) != expected * 2:
+            raise ToolError("音频数据不完整，未生成转写。")
+    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+
+
+def transcribe(path: Path, model: Path, language: str | None = None, *, audio_chunk_seconds: int | None = None) -> list[Segment]:
     if not path.is_file():
         raise ToolError(f"音频文件不存在：{path}")
     model = model.expanduser().resolve()
     if not model.is_dir() or not (model / "config.json").is_file() or not any((model / name).is_file() for name in ("weights.npz", "weights.safetensors")):
         raise ToolError("--whisper-model 必须是已下载的本地 MLX Whisper 目录，含 config.json 和 weights.npz / weights.safetensors；不会自动下载。")
+    if audio_chunk_seconds is not None and (
+        type(audio_chunk_seconds) is not int or audio_chunk_seconds < 30
+        or audio_chunk_seconds > sys.maxsize // 32000
+    ):
+        raise ToolError("--audio-chunk-seconds 必须是至少 30 的整数秒。")
     # Even a future library change must not silently download during inference.
     os.environ["HF_HUB_OFFLINE"] = "1"
     try:
@@ -107,6 +126,38 @@ def transcribe(path: Path, model: Path, language: str | None = None) -> list[Seg
     except ImportError as exc:
         raise ToolError("缺少本地转写依赖；Apple Silicon 上运行 uv sync --extra audio。") from exc
     try:
+        if audio_chunk_seconds is not None:
+            import numpy as np
+
+            segments = []
+            with _decoded_audio(path) as source:
+                total = source.getnframes()
+                per_chunk = audio_chunk_seconds * 16000
+                count = (total + per_chunk - 1) // per_chunk
+                for index in range(count):
+                    expected = min(per_chunk, total - index * per_chunk)
+                    data = source.readframes(expected)
+                    if len(data) != expected * 2:
+                        raise ToolError(f"音频第 {index + 1}/{count} 段数据不完整，未生成转写。")
+                    print(f"本地 Whisper 音频分段 {index + 1}/{count}…", file=sys.stderr)
+                    samples = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
+                    try:
+                        result = mlx_whisper.transcribe(samples, path_or_hf_repo=str(model), language=language, verbose=False, fp16=True, condition_on_previous_text=False)
+                    except Exception as exc:
+                        raise ToolError(f"本地 Whisper 第 {index + 1}/{count} 段转写失败（{type(exc).__name__}）；未生成不完整转写。") from exc
+                    offset = index * per_chunk / 16000
+                    for segment in parse_segments(result, allow_empty=True):
+                        duration = expected / 16000
+                        if segment.start >= duration or segment.end > duration + 0.1 + 1e-9:
+                            raise ToolError(f"本地 Whisper 第 {index + 1}/{count} 段返回超出音频范围的时间戳；未生成不完整转写。")
+                        end = segment.end
+                        if end > duration:
+                            print(f"第 {index + 1}/{count} 段时间戳略超音频末尾，已截到实际末尾。", file=sys.stderr)
+                            end = duration
+                        segments.append(Segment(segment.start + offset, end + offset, segment.text))
+            if not segments:
+                raise ToolError("没有识别到语音；未生成空白纪要。")
+            return segments
         samples = _load_audio(path)
         result = mlx_whisper.transcribe(samples, path_or_hf_repo=str(model), language=language, verbose=False, fp16=True, condition_on_previous_text=False)
         return parse_segments(result)
@@ -384,6 +435,8 @@ def handle(args) -> int:
         raise ToolError("音频文件与 --transcript-json 只能选一个。")
     if not args.input and not args.transcript_json:
         raise ToolError("请提供音频文件，或 --transcript-json。")
+    if args.transcript_json and getattr(args, "audio_chunk_seconds", None) is not None:
+        raise ToolError("--audio-chunk-seconds 只用于音频输入，不能与 --transcript-json 同用。")
     if args.chunk_chars < 500:
         raise ToolError("--chunk-chars 至少为 500。")
     source = (args.input or args.transcript_json).expanduser().resolve()
@@ -391,7 +444,10 @@ def handle(args) -> int:
         if not args.whisper_model:
             raise ToolError("音频转写需要 --whisper-model 指定已下载的本地 MLX Whisper 模型目录。")
         print("本地 Whisper 转写中…", file=sys.stderr)
-        segments = transcribe(source, args.whisper_model, args.language)
+        if getattr(args, "audio_chunk_seconds", None) is None:
+            segments = transcribe(source, args.whisper_model, args.language)
+        else:
+            segments = transcribe(source, args.whisper_model, args.language, audio_chunk_seconds=args.audio_chunk_seconds)
     else:
         segments = read_transcript(source)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -420,5 +476,6 @@ def register(subparsers):
     parser.add_argument("--language", help="Whisper 语言代码，例如 zh、en；默认自动检测")
     parser.add_argument("--output-dir", type=Path, required=True, help="输出目录，每次创建独立日期子目录")
     parser.add_argument("--no-summary", action="store_true", help="只转写，不调用摘要模型")
+    parser.add_argument("--audio-chunk-seconds", type=int, help="可选：按指定秒数分段转写以降低内存，至少 30 秒；边界可能截断语句")
     parser.add_argument("--chunk-chars", type=int, default=5000, help="每块最大转写字符数，默认 5000")
     parser.set_defaults(func=handle)

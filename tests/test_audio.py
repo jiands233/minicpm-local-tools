@@ -1,6 +1,10 @@
 import argparse
 import json
+import shutil
+import sys
+import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -130,6 +134,155 @@ def test_model_path_never_accepts_hub_name(tmp_path):
     path.touch()
     with pytest.raises(ToolError, match='不会自动下载'):
         transcribe(path, Path('mlx-community/whisper-tiny'))
+
+
+def _chunked_test_files(tmp_path, seconds=65):
+    source = tmp_path / 'audio.wav'
+    with wave.open(str(source), 'wb') as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b'\0\0' * (seconds * 16000))
+    model = tmp_path / 'model'
+    model.mkdir()
+    (model / 'config.json').touch()
+    (model / 'weights.npz').touch()
+    return source, model
+
+
+def test_chunked_transcription_offsets_timestamps_and_allows_silent_chunks(tmp_path, monkeypatch, capsys):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path)
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    calls = []
+    def fake_transcribe(samples, **kwargs):
+        calls.append((len(samples), kwargs['path_or_hf_repo']))
+        if len(calls) == 2:
+            return {'segments': []}
+        return {'segments': [{'start': 0.25, 'end': 1.0, 'text': f'chunk {len(calls)}'}]}
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
+    segments = transcribe(source, model, 'zh', audio_chunk_seconds=30)
+    assert segments == [Segment(0.25, 1.0, 'chunk 1'), Segment(60.25, 61.0, 'chunk 3')]
+    assert [length for length, _ in calls] == [480000, 480000, 80000]
+    assert all(path == str(model.resolve()) for _, path in calls)
+    assert '音频分段 3/3' in capsys.readouterr().err
+
+
+def test_chunked_failure_never_writes_partial_transcript(tmp_path, monkeypatch):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=31)
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    calls = []
+    def fake_transcribe(samples, **kwargs):
+        calls.append(len(samples))
+        if len(calls) == 2:
+            raise RuntimeError('model failure')
+        return {'segments': [{'start': 0, 'end': 1, 'text': 'partial'}]}
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
+    out = tmp_path / 'out'
+    args = argparse.Namespace(input=source, transcript_json=None, whisper_model=model, language='zh',
+                              chunk_chars=5000, audio_chunk_seconds=30, output_dir=out, no_summary=True)
+    with pytest.raises(ToolError, match='第 2/2 段转写失败'):
+        handle(args)
+    assert not out.exists()
+
+
+def test_chunked_silence_and_truncated_audio_fail_without_partial_success(tmp_path, monkeypatch):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=31)
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=lambda *a, **k: {'segments': []}))
+    with pytest.raises(ToolError, match='没有识别到语音'):
+        transcribe(source, model, audio_chunk_seconds=30)
+    with source.open('r+b') as file:
+        file.truncate(source.stat().st_size - 4000)
+    with pytest.raises(ToolError, match='数据不完整'):
+        transcribe(source, model, audio_chunk_seconds=30)
+
+
+def test_chunk_size_validation(tmp_path):
+    source, model = _chunked_test_files(tmp_path, seconds=1)
+    with pytest.raises(ToolError, match='至少 30'):
+        transcribe(source, model, audio_chunk_seconds=29)
+
+
+def test_chunked_rejects_timestamp_beyond_last_short_chunk(tmp_path, monkeypatch):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=31)
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    calls = []
+    def fake_transcribe(samples, **kwargs):
+        calls.append(len(samples))
+        return {'segments': [{'start': 0, 'end': 1 if len(calls) == 1 else 1.2, 'text': 'text'}]}
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
+    with pytest.raises(ToolError, match='第 2/2 段返回超出音频范围'):
+        transcribe(source, model, audio_chunk_seconds=30)
+
+
+def test_chunked_clamps_only_small_end_overrun_and_warns(tmp_path, monkeypatch, capsys):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=31)
+    with wave.open(str(source), 'wb') as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b'\0\0' * (31 * 16000 + 123))
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    calls = []
+    def fake_transcribe(samples, **kwargs):
+        calls.append(len(samples))
+        return {'segments': [{'start': 0, 'end': 1 if len(calls) == 1 else 1.08, 'text': 'text'}]}
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fake_transcribe))
+    result = transcribe(source, model, audio_chunk_seconds=30)
+    assert result[-1] == Segment(30, 31 + 123 / 16000, 'text')
+    assert '时间戳略超音频末尾' in capsys.readouterr().err
+
+
+def test_chunked_rejects_start_outside_actual_audio(tmp_path, monkeypatch):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=1)
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: None)
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=lambda *a, **k: {
+        'segments': [{'start': 1.01, 'end': 1.02, 'text': 'past audio'}],
+    }))
+    with pytest.raises(ToolError, match='超出音频范围'):
+        transcribe(source, model, audio_chunk_seconds=30)
+
+
+def test_chunked_failure_cleans_decoded_temporary_file(tmp_path, monkeypatch):
+    pytest.importorskip('numpy')
+    from minicpm_tools import audio
+    source, model = _chunked_test_files(tmp_path, seconds=1)
+    tmp_location = tmp_path / 'temporary'
+    tmp_location.mkdir()
+    monkeypatch.setattr(audio.tempfile, 'tempdir', str(tmp_location))
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: '/usr/bin/afconvert' if name == 'afconvert' else None)
+    def fake_converter(command, **kwargs):
+        shutil.copyfile(source, command[-1])
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(audio.subprocess, 'run', fake_converter)
+    def fail(*args, **kwargs):
+        raise RuntimeError('failure')
+    monkeypatch.setitem(sys.modules, 'mlx_whisper', SimpleNamespace(transcribe=fail))
+    with pytest.raises(ToolError, match='转写失败'):
+        transcribe(source, model, audio_chunk_seconds=30)
+    assert list(tmp_location.iterdir()) == []
+
+
+def test_chunking_is_not_a_transcript_json_option(tmp_path):
+    source = tmp_path / 'input.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 1, 'text': 'text'}]}))
+    args = argparse.Namespace(input=None, transcript_json=source, audio_chunk_seconds=30,
+                              chunk_chars=5000, output_dir=tmp_path / 'out', no_summary=True)
+    with pytest.raises(ToolError, match='不能与 --transcript-json 同用'):
+        handle(args)
+    assert not args.output_dir.exists()
 
 
 def test_summary_failure_keeps_transcript(tmp_path, monkeypatch):
