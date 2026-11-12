@@ -43,6 +43,10 @@ Python 调用桥接器前会通过不访问系统剪贴板的协议探测检查�
 
 `--text`、`--file`、`--stdin`、`--image` 互斥，且不能与 `--apply` 同用。默认 CLI 图片动作会读取剪贴板 PNG / TIFF；复制文件图标不等价于复制图片内容。文本输入硬上限为 24,000 字符，桥接图片最多 20 MB；具体模型的上下文可能更小，遇上下文超限请缩短或分段。
 
+文件和标准输入只读取上限再多一个字符，以判断是否超长；不会为了拒绝长文件而将其完整载入内存。文件按 UTF-8 解码，字符上限并非字节上限。
+
+2026-11-12 使用 64 MiB 合成 ASCII 文件和模型替身验证：修改前拒绝超长输入时 `tracemalloc` 记录的 Python 分配峰值约 128 MiB，修改后约 0.08 MiB，且没有模型调用。该数字是单次 Python 分配观测，不代表完整进程内存；未使用系统剪贴板或个人文件。
+
 ## 模型与边界
 
 - 文本使用共享配置的本地 MiniCPM 服务。[MiniCPM 官方 Ollama 部署](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/ollama.md)，[Apple Silicon MLX 部署](https://github.com/OpenBMB/MiniCPM/blob/main/skills/minicpm5-deploy-mlx/SKILL.md)。

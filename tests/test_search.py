@@ -168,6 +168,60 @@ def test_symlink_escape_and_deleted_results_excluded(corpus, tmp_path):
     assert search_index(index, "biology", client=FakeClient()) == []
 
 
+@pytest.mark.parametrize("kind", ["renamed", "deleted", "symlink", "outside"])
+def test_unavailable_source_warns_once_without_returning_stale_content(corpus, tmp_path, capsys, kind):
+    root, index = corpus
+    source = root / "sensitive-name.txt"
+    # Multiple chunks from one source must count as one unavailable file.
+    source.write_text("unique-neptune-evidence " * 300, encoding="utf-8")
+    index_folder(root, index, mode="keyword", ocr=False, client=FakeClient())
+    capsys.readouterr()
+    if kind == "renamed":
+        source.rename(root / "renamed.txt")
+    elif kind == "deleted":
+        source.unlink()
+    elif kind == "outside":
+        source.rename(tmp_path / "moved.txt")
+    else:
+        source.unlink()
+        target = tmp_path / "outside.txt"
+        target.write_text("unique-neptune-evidence private", encoding="utf-8")
+        source.symlink_to(target)
+
+    assert search_index(index, "neptune", client=FakeClient(), mode="keyword") == []
+    result = capsys.readouterr()
+    assert "1 个文件已移除、不可访问或不在范围内" in result.err
+    assert "sensitive-name" not in result.err and "unique-neptune" not in result.err
+    assert result.out == ""
+    if kind == "renamed":
+        index_folder(root, index, mode="keyword", ocr=False, client=FakeClient(),
+                     replace=True, incremental=True)
+        capsys.readouterr()
+        hits = search_index(index, "neptune", client=FakeClient(), mode="keyword")
+        assert len(hits) == 1 and Path(hits[0].path).name == "renamed.txt"
+        assert "文件已移除" not in capsys.readouterr().err
+
+
+def test_unavailable_empty_source_and_legacy_index_are_reported(corpus, capsys):
+    root, index = corpus
+    empty = root / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    index_folder(root, index, mode="keyword", ocr=False, client=FakeClient())
+    capsys.readouterr()
+    empty.unlink()
+    search_index(index, "biology", client=FakeClient())
+    assert "1 个文件已移除、不可访问或不在范围内" in capsys.readouterr().err
+
+    # A legacy index cannot track empty files, but paths present in its chunks
+    # should still be checked even without the fingerprint map.
+    with sqlite3.connect(index) as db:
+        db.execute("DELETE FROM metadata WHERE key='file_fingerprints'")
+    (root / "marine.md").unlink()
+    assert search_index(index, "biology", client=FakeClient()) == []
+    warning = capsys.readouterr().err
+    assert "1 个文件已移除、不可访问或不在范围内" in warning
+
+
 def test_large_document_is_chunked_and_embedding_batches_bounded(corpus):
     root, index = corpus
     (root / "long.md").write_text("marine biology ocean " * 4000)

@@ -86,15 +86,15 @@ JSON 结构是 `{"segments":[{"start":0,"end":3.5,"text":"原文"}]}`，时间�
   --language zh --audio-chunk-seconds 300 --output-dir outputs/audio
 ```
 
-默认不分段，保持原有转写行为。此选项仅接受至少 30 秒的整数，不能与 `--transcript-json` 同用；它不同于控制摘要文本分块的 `--chunk-chars`。分段模式会先将完整音频转换成私有临时 WAV，再逐段加载和调用 Whisper，输出时间戳偏移回原音频。临时 WAV 占用的磁盘空间仍随长度增长（16 kHz 单声道 16-bit 约每小时 110 MiB），并非流式解码；Whisper 模型和推理本身仍需要内存。转换器解码超过 10 分钟会停止，可手动分割音频后重试。正常结束和异常时临时目录会清理；强制结束或系统崩溃可能残留。
+默认不分段；时间边界检查见下文。此选项仅接受至少 30 秒的整数，不能与 `--transcript-json` 同用；它不同于控制摘要文本分块的 `--chunk-chars`。分段模式会先将完整音频转换成私有临时 WAV，再逐段加载和调用 Whisper，输出时间戳偏移回原音频。临时 WAV 占用的磁盘空间仍随长度增长（16 kHz 单声道 16-bit 约每小时 110 MiB），并非流式解码；Whisper 模型和推理本身仍需要内存。转换器解码超过 10 分钟会停止，可手动分割音频后重试。正常结束和异常时临时目录会清理；强制结束或系统崩溃可能残留。
 
-分段没有重叠，切点可能截断词句或让片段缺少上下文；指定 `--language` 可避免各段独立自动识别语言。任何一段转写失败或时间戳大幅超出该段实际时长时，整次失败，不把已有片段当作完整结果写出。实测 Whisper 有时将末尾时间预测到实际片段外：对于最多 0.1 秒的结束时间越界，工具提示并截到实际片段末尾；起点越界或超出超过 0.1 秒会报错。合并时间戳依然是模型估计，须与原音频核对。
+分段没有重叠，切点可能截断词句或让片段缺少上下文；指定 `--language` 可避免各段独立自动识别语言。任何一段转写失败或时间戳大幅超出该段实际时长时，整次失败，不把已有片段当作完整结果写出。实测 Whisper 有时将结束时间预测到实际音频之外：分段和非分段模式均对最多 0.30 秒的结束时间越界给出提示并截到实际末尾；起点越界或结束时间超出超过 0.30 秒则报错。截断只保证时间不超出实际范围，不保证对应文字准确；时间戳仍是模型估计，须与原音频核对。
 
 可选在分段命令中加入 `--audio-silence-cut`，尝试在固定切点前两秒内找连续 0.3 秒的低能量窗口，并在该窗口中间切分；没有满足绝对强度和相对周围强度阈值的窗口时仍在固定点切分。每个音频采样连续且只处理一次，无重叠、无基于猜测的文本去重；除最后余段外，各段长度可能比指定长度短最多约两秒。低能量不是语音活动检测，不保证找到的是说话停顿，低音量语音、噪声、音乐或辅音仍可能造成误判；不启用该选项时保留固定分段。该选项必须与 `--audio-chunk-seconds` 一起用于音频，不能用于已有转写 JSON。
 
 2026-11-12，固定与静音优先切分各一次比较：从公开 JFK 演说取原音频第 40–85 秒，同一本机 tiny 模型在 30 秒固定边界将参考中的 “revolutionary beliefs” 识成 “revolutionaries” 接 “believe”；静音优先选中约 29.15 秒位置，识别为 “Revolutionary Belief”。两者其他词仍有错误；该单人英语样本不是会议质量评测，不证明其他切点必然改善。原音频与参考来源见下方真实英语人声记录，输出位于本机忽略目录 `.local/validation/silence-cut-eval-_9xy4akw/`。
 
-2026-11-12：将公开 JFK 演说样本重复拼成 40.0076875 秒，在本机使用 tiny、30 秒分段、无摘要实测。首次严格检查拒绝第 1 段的 28.08–30.08 秒末句，未发布转写；加入上述有限末尾修正后，重跑成功并提示截断，第二段时间戳以 30 秒为起点，输出末尾不超过音频总时长。这是人工拼接的单人短录音，不证明长会议完整性或分段边界准确率；英文识别本身仍有原样本已记录的错误。
+2026-11-12：将公开 JFK 演说样本重复拼成 40.0076875 秒，在本机使用 tiny、30 秒分段、无摘要实测。首次严格检查拒绝第 1 段的 28.08–30.08 秒末句，未发布转写；当时引入最多 0.1 秒末尾修正后重跑成功并提示截断，之后根据下方中文样本将分段与非分段统一为最多 0.30 秒。第二段时间戳以 30 秒为起点，输出末尾不超过音频总时长。这是人工拼接的单人短录音，不证明长会议完整性或分段边界准确率；英文识别本身仍有原样本已记录的错误。
 
 技术来源：[MLX Whisper 官方说明](https://github.com/ml-explore/mlx-examples/tree/main/whisper)、[MiniCPM 官方部署](https://github.com/OpenBMB/MiniCPM/blob/main/docs/deployment/ollama.md)。
 
@@ -170,6 +170,42 @@ shasum -a 256 "$sample_dir/chinese.wav"
 ```
 
 将 `--whisper-model` 改为事先准备好的 large-v3-turbo 本地目录可对照该模型；权重取得与校验说明见下方真实人声模型对比部分。模型、下载音频和输出均不进入 Git。
+
+#### 连续中文朗读的分段失败样本
+
+另一组使用 [LibriVox《呐喊》录音条目](https://archive.org/details/call_to_arms_jl_librivox) 中 Jing Li 朗读的《鸭的喜剧》，取**连续前 45 秒**，不是拼接音频或会议录音。其 [样例来源说明](https://github.com/forward-intoxicate/video2context/blob/main/samples/README.md#chinese_speech_samplemp4--真人中文长音频)标注该录音为公共领域；可参考[维基文库原文](https://zh.wikisource.org/zh-hans/鸭的喜剧)，但这次没有逐字人工听审。源 MP3 SHA256：`5eee0d88981d90838c2c69db4b626d580717a19cbf6a43363ab8d0295bdc8623`；45 秒 16 kHz WAV SHA256：`08fd8a62a59501f73d314bc336d9bc62473cbb0d2628955236097802118d4bb7`。音频及结果仅存本机忽略目录 `.local/validation/human-speech/zh-librivox.qa3EppOy/`。
+
+旧版的本机 tiny 对照中，固定 30 秒与 `--audio-silence-cut` 均**失败**，未生成不完整转写：静音检测在首个固定切点前没有找到符合条件的窗口，因此两种模式一致；Whisper 对首段最后一项返回 `27.42–30.30` 秒，超出 30 秒片段 0.30 秒，超过当时允许的 0.1 秒。旧版无分段转写则成功，但有多处明显识别错误，且最后时间戳为 45.12 秒、超过音频总长，旧代码未校验这个越界。
+
+统一时间边界为最多 0.30 秒后，将固定切分、静音优先切分和无分段各重跑一次，均成功并提示截断，三个输出的最大结束时间均为 45.00 秒。固定切分和静音优先在首个切点上仍相同：对作品原文中的“入芝兰之室，久而不闻其香”，两者在 30 秒边界分别输出“如知覊知识九而不温”和“其香 只以為很時讓讓罷了”；无分段输出的对应词句也有错误。参考是作品文字，并未逐字人工听审该录音；截断修复不能消除切词或识别错误。复测输出存于 `.local/validation/human-speech/zh-librivox.qa3EppOy/retest.XVEEj45G/`。该有限样本不能推断模型总体准确率或真实会议质量。
+
+复现（显式下载约 3 MiB 公开音频，先准备好本地 tiny 模型；每次新建目录）：
+
+```sh
+(
+set -eu
+mkdir -p .local/validation/human-speech
+sample_dir="$(mktemp -d .local/validation/human-speech/zh-librivox.XXXXXXXX)"
+curl -fL https://archive.org/download/call_to_arms_jl_librivox/calltoarms_15_lu_64kb.mp3 -o "$sample_dir/source.mp3"
+shasum -a 256 "$sample_dir/source.mp3"
+afconvert -f WAVE -d LEI16@16000 -c 1 "$sample_dir/source.mp3" "$sample_dir/full.wav"
+.venv/bin/python - "$sample_dir" <<'PY'
+import sys, wave
+from pathlib import Path
+folder = Path(sys.argv[1])
+with wave.open(str(folder / 'full.wav'), 'rb') as source:
+    frames = source.readframes(45 * source.getframerate())
+    with wave.open(str(folder / 'first45.wav'), 'wb') as target:
+        target.setparams(source.getparams())
+        target.writeframes(frames)
+PY
+for mode in fixed silence; do
+  if [ "$mode" = silence ]; then set -- --audio-silence-cut; else set --; fi
+  .venv/bin/mcpm audio "$sample_dir/first45.wav" --whisper-model .local/whisper-tiny --language zh --audio-chunk-seconds 30 "$@" --no-summary --output-dir "$sample_dir/$mode" || echo "$mode: 转写失败，请检查错误"
+done
+.venv/bin/mcpm audio "$sample_dir/first45.wav" --whisper-model .local/whisper-tiny --language zh --no-summary --output-dir "$sample_dir/unchunked"
+)
+```
 
 ### 真实英语人声小样本（2026-11-12）
 

@@ -504,16 +504,27 @@ def search_index(
     if fingerprints is not None and not isinstance(fingerprints, dict):
         raise ToolError("索引中的文件状态无效，请重建索引。")
     source_status = {}
+    unavailable = set()
     scored = []
+
+    def source_in_scope(actual: Path) -> bool:
+        try:
+            return (not actual.is_symlink() and actual.is_file()
+                    and actual.resolve().is_relative_to(root))
+        except (OSError, RuntimeError):
+            return False
+
     for path, page, body, source, vector in records:
         actual = Path(path)
-        if actual.is_symlink() or not actual.is_file() or not actual.resolve().is_relative_to(root):
+        if not source_in_scope(actual):
+            unavailable.add(path)
             continue
         if path not in source_status:
             saved = fingerprints.get(path) if fingerprints is not None else None
             try:
                 current = list(_file_identity(actual.stat()))
             except OSError:
+                unavailable.add(path)
                 continue
             if saved is not None and (
                 not isinstance(saved, list)
@@ -543,10 +554,11 @@ def search_index(
     # textless PDF indexed with --no-ocr. They may later gain searchable text;
     # checking only chunk paths would silently report an empty result as fresh.
     for path, saved in (fingerprints or {}).items():
-        if path in source_status:
+        if path in source_status or path in unavailable:
             continue
         actual = Path(path)
-        if actual.is_symlink() or not actual.is_file() or not actual.resolve().is_relative_to(root):
+        if not source_in_scope(actual):
+            unavailable.add(path)
             continue
         if saved is not None and (
             not isinstance(saved, list)
@@ -557,17 +569,22 @@ def search_index(
         try:
             current = list(_file_identity(actual.stat()))
         except OSError:
+            unavailable.add(path)
             continue
         source_status[path] = None if saved is None else saved != current
     # Warn even when no old excerpt matches: new contents are not indexed yet.
-    changed = sum(status is True for status in source_status.values())
-    unknown = sum(status is None for status in source_status.values())
-    if changed or unknown:
+    changed = sum(status is True for path, status in source_status.items() if path not in unavailable)
+    unknown = sum(status is None for path, status in source_status.items() if path not in unavailable)
+    if changed or unknown or unavailable:
         print(
-            f"索引状态：{changed} 个文件已变化，{unknown} 个文件状态未知；"
+            f"索引状态：{changed} 个文件已变化，{unknown} 个文件状态未知，"
+            f"{len(unavailable)} 个文件已移除、不可访问或不在范围内；"
             "搜索依据旧索引，请考虑使用 --replace 重建。",
             file=sys.stderr,
         )
+    # A source that became unavailable between two chunks should not retain a
+    # previously scored hit from this same query.
+    scored = [hit for hit in scored if hit.path not in unavailable]
     scored.sort(key=lambda hit: (-hit.score, hit.path, hit.page or 0))
     # Return distinct files/pages, keeping the strongest matching excerpt.
     hits = []

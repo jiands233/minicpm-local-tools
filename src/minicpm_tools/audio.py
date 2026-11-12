@@ -137,6 +137,22 @@ def _silence_cut_frame(data: bytes) -> int | None:
     return None
 
 
+def _bounded_segments(segments: list[Segment], duration: float, *, label: str | None = None) -> list[Segment]:
+    """Clamp a small end overrun; reject any start outside the actual audio."""
+    result = []
+    subject = f"本地 Whisper 第 {label} 段" if label else "本地 Whisper"
+    warning_subject = f"第 {label} 段" if label else "音频"
+    for segment in segments:
+        if segment.start >= duration or segment.end > duration + 0.3 + 1e-9:
+            raise ToolError(f"{subject}返回超出音频范围的时间戳；未生成不完整转写。")
+        end = segment.end
+        if end > duration:
+            print(f"{warning_subject}时间戳略超音频末尾，已截到实际末尾。", file=sys.stderr)
+            end = duration
+        result.append(Segment(segment.start, end, segment.text))
+    return result
+
+
 def transcribe(path: Path, model: Path, language: str | None = None, *, audio_chunk_seconds: int | None = None, audio_silence_cut: bool = False) -> list[Segment]:
     if not path.is_file():
         raise ToolError(f"音频文件不存在：{path}")
@@ -186,15 +202,9 @@ def transcribe(path: Path, model: Path, language: str | None = None, *, audio_ch
                     except Exception as exc:
                         raise ToolError(f"本地 Whisper 第 {label} 段转写失败（{type(exc).__name__}）；未生成不完整转写。") from exc
                     offset = position / 16000
-                    for segment in parse_segments(result, allow_empty=True):
-                        duration = expected / 16000
-                        if segment.start >= duration or segment.end > duration + 0.1 + 1e-9:
-                            raise ToolError(f"本地 Whisper 第 {label} 段返回超出音频范围的时间戳；未生成不完整转写。")
-                        end = segment.end
-                        if end > duration:
-                            print(f"第 {label} 段时间戳略超音频末尾，已截到实际末尾。", file=sys.stderr)
-                            end = duration
-                        segments.append(Segment(segment.start + offset, end + offset, segment.text))
+                    bounded = _bounded_segments(parse_segments(result, allow_empty=True), expected / 16000, label=label)
+                    for segment in bounded:
+                        segments.append(Segment(segment.start + offset, segment.end + offset, segment.text))
                     position += expected
                     index += 1
             if not segments:
@@ -202,7 +212,7 @@ def transcribe(path: Path, model: Path, language: str | None = None, *, audio_ch
             return segments
         samples = _load_audio(path)
         result = mlx_whisper.transcribe(samples, path_or_hf_repo=str(model), language=language, verbose=False, fp16=True, condition_on_previous_text=False)
-        return parse_segments(result)
+        return _bounded_segments(parse_segments(result), len(samples) / 16000)
     except ToolError:
         raise
     except Exception as exc:

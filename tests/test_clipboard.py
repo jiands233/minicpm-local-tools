@@ -2,7 +2,10 @@
 
 import argparse
 import base64
+import json
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +48,39 @@ class ClipboardTests(unittest.TestCase):
             with self.assertRaises(ToolError):
                 clipboard.transform(text, "todos", client)
         self.assertEqual(client.prompts, [])
+
+    def test_file_character_limit_accepts_utf8_and_rejects_extra_before_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "input.txt"
+            args = argparse.Namespace(action="todos", apply=False, text=None, file=str(path),
+                                      image=None, stdin=False, language="中文")
+            client = FakeClient()
+            with patch.object(clipboard.LocalClient, "from_env", return_value=client):
+                path.write_text("鲸" * clipboard.MAX_TEXT, encoding="utf-8")
+                clipboard.run(args)
+                self.assertEqual(client.prompts[0][0], "鲸" * clipboard.MAX_TEXT)
+                path.write_text("鲸" * (clipboard.MAX_TEXT + 1), encoding="utf-8")
+                with self.assertRaisesRegex(ToolError, "文本过长"):
+                    clipboard.run(args)
+                self.assertEqual(len(client.prompts), 1)
+
+    def test_large_text_file_is_not_fully_loaded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "large.txt"
+            with path.open("wb") as stream:
+                for _ in range(16):
+                    stream.write(b"x" * (1024 * 1024))
+            program = (
+                "import json,sys,tracemalloc; from pathlib import Path; "
+                "from minicpm_tools.clipboard import read_text_file; "
+                "tracemalloc.start(); value=read_text_file(Path(sys.argv[1])); "
+                "print(json.dumps([len(value),tracemalloc.get_traced_memory()[1]]))"
+            )
+            result = subprocess.run([sys.executable, "-c", program, str(path)], check=True,
+                                    capture_output=True, text=True)
+            length, peak = json.loads(result.stdout)
+            self.assertEqual(length, clipboard.MAX_TEXT + 1)
+            self.assertLess(peak, 2 * 1024 * 1024)
 
     def test_image_todos_removes_temporary_image(self):
         client = FakeClient()

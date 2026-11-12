@@ -128,6 +128,13 @@ def process_snapshot(
     return transform(snapshot.get("text", ""), action, client, language)
 
 
+def read_text_file(path: Path) -> str:
+    # Read at most one character past the limit; do not load a large file into
+    # memory only to reject it. Text mode preserves UTF-8 character counting.
+    with path.expanduser().open("r", encoding="utf-8") as source:
+        return source.read(MAX_TEXT + 1)
+
+
 def run(args: argparse.Namespace) -> int:
     if args.apply and (args.text is not None or args.file or args.image or args.stdin):
         raise ToolError("--apply 只用于当前剪贴板；文件/文本输入请预览后自行复制。")
@@ -147,7 +154,7 @@ def run(args: argparse.Namespace) -> int:
             args.text
             if args.text is not None
             else (
-                Path(args.file).expanduser().read_text(encoding="utf-8")
+                read_text_file(Path(args.file))
                 if args.file
                 else sys.stdin.read(MAX_TEXT + 1)
             )
