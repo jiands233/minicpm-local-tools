@@ -75,3 +75,35 @@ def test_large_file_acceptance_requires_expected_scope_and_predicates():
     verify.check_large_file_find("find . -size +100M -type f -print")
     with pytest.raises(verify.CheckFailure):
         verify.check_large_file_find("find / -type f -size +100M")
+
+
+def test_shell_acceptance_explicit_zsh_without_shell_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("SHELL", raising=False)
+
+    class SyntheticRun:
+        def __init__(self):
+            self.directory = tmp_path
+            self.calls = []
+
+        def cli(self, *args, label, **kwargs):
+            self.calls.append((args, label))
+            if label == "shell-find":
+                command = "find . -type f -size +100M"
+            elif label == "shell-lsof":
+                command = "lsof -i :8080"
+            elif label == "shell-df":
+                command = "df -h"
+            elif label == "shell-rename-preview":
+                return "建议命令（尚未执行）：\nrename .txt .md\n执行限制"
+            elif label == "shell-explain":
+                return "gzip notes"
+            else:
+                assert kwargs["expected"] == 1
+                return ""
+            return f"建议命令（尚未执行）：\n{command}\n"
+
+    runner = SyntheticRun()
+    verify.shell(runner)
+    calls = [args for args, _ in runner.calls if args[1] in ("suggest", "explain")]
+    assert len(calls) == 5
+    assert all(args[-2:] == ("--shell", "zsh") for args in calls)

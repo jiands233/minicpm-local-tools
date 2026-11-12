@@ -1,6 +1,6 @@
 # 真实模型验收脚本
 
-脚本只使用合成文本、生成的图片、PDF、音频和浏览记录，不读取用户实际剪贴板或浏览历史，也不下载模型。需要已安装 README 中的 PDF / 音频依赖、已启动的本地模型，以及 macOS 语音工具。
+脚本只使用合成文本、生成的图片、PDF、音频和浏览记录，不读取用户实际剪贴板或浏览历史，也不下载模型。命令助手的模型验收固定目标 shell 为 zsh，使非交互环境缺少 `SHELL` 时也可复现；这不等于覆盖所有 shell。需要已安装 README 中的 PDF / 音频依赖、已启动的本地模型，以及 macOS 语音工具。
 
 ```sh
 .venv/bin/python script/verify_mvp.py --output-dir .local/acceptance --whisper-model .local/whisper-tiny

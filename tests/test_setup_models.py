@@ -140,3 +140,27 @@ def test_runtime_archive_traversal_rejected(tmp_path, monkeypatch):
         setup.install_runtime(component, tmp_path)
     assert not (tmp_path / "escape").exists()
     assert not (tmp_path / ".local/runtime/ollama").exists()
+
+
+def test_download_concurrent_destination_is_never_clobbered(tmp_path, monkeypatch):
+    item = fixture_item()
+    component = {"kind": "text", "repo": "owner/model", "revision": "b" * 40}
+
+    def fake_curl(command, **kwargs):
+        Path(command[command.index("--output") + 1]).write_bytes(b"model fixture")
+        return subprocess.CompletedProcess(command, 0)
+
+    real_link = setup.os.link
+    destination = tmp_path / item["destination"]
+
+    def concurrent_link(source, target):
+        # Simulate another process creating the destination at the publish point.
+        destination.write_bytes(b"other process data")
+        return real_link(source, target)
+
+    monkeypatch.setattr(setup.subprocess, "run", fake_curl)
+    monkeypatch.setattr(setup.os, "link", concurrent_link)
+    with pytest.raises(setup.SetupError, match="appeared during download"):
+        setup.download_file(component, item, tmp_path)
+    assert destination.read_bytes() == b"other process data"
+    assert sorted(p.name for p in destination.parent.iterdir()) == [destination.name]

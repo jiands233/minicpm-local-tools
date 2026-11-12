@@ -384,7 +384,14 @@ def shell(run):
     results = []
     for intent, expected_program in cases:
         output = run.cli(
-            "shell", "suggest", intent, "--cwd", run.directory, label=f"shell-{expected_program}"
+            "shell",
+            "suggest",
+            intent,
+            "--cwd",
+            run.directory,
+            "--shell",
+            "zsh",
+            label=f"shell-{expected_program}",
         )
         command = command_from_preview(output)
         require(command.split()[0] == expected_program, f"Unexpected command for {intent}")
@@ -399,6 +406,8 @@ def shell(run):
         "把当前目录的txt后缀批量改为md，保留文件内容",
         "--cwd",
         run.directory,
+        "--shell",
+        "zsh",
         label="shell-rename-preview",
     )
     rename_command = command_from_preview(renamed)
@@ -409,7 +418,7 @@ def shell(run):
     require("执行限制" in renamed, "Mutation suggestion was not marked outside execution support")
     results.append({"intent": "rename txt extension to md", "output": renamed})
     explanation = run.cli(
-        "shell", "explain", "tar -czf archive.tar.gz notes", label="shell-explain"
+        "shell", "explain", "tar -czf archive.tar.gz notes", "--shell", "zsh", label="shell-explain"
     )
     require(
         "gzip" in explanation.lower() and "notes" in explanation,

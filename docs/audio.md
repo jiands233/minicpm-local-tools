@@ -101,3 +101,39 @@ sh examples/audio_demo.sh /absolute/path/to/whisper-model
 合成转写包含 600 次相同的“小王明天交报告。”，共 4800 字符，单个 Whisper 时间范围为 0–600 秒。此前默认按字符分块会让 600 个来源 ID 和 JSON 字段一起送入请求，服务报告 11434 tokens，超过 8192 上下文并返回 HTTP 400；转写保留。新的限制把它分成 25 块，在本机 MiniCPM5-2B 上完成 50 次模型请求，产生可对照原文的待办及原始 0–600 秒时间范围，约用时 5 分 21 秒（单次、重复文本，不是性能基准或真实会议质量测试）。
 
 该测试的多块概述出现了重复句，现仅对完全相同的概述做稳定去重，不让模型自由合并或推断；这是事后根据输出做的代码调整，已使用单元测试验证，未重跑整段。仅当原文、完整起止时间和（行动项的）负责人、截止时间都相同时才合并重复引用；不同结束时间或不同指派会分别保留。完全同一转写段中出现多次相同文字时，Whisper 没有提供分句位置或独立时间戳，本工具仍可能合并这些无法区分的重复项；请以完整转写为准。这份重复样本不能证明真实长会议摘要完整、准确或能识别所有任务。
+
+### 真实人声小样本（2026-11-12）
+
+为补充合成语音测试，另用肯尼迪 1961 年就职演说的公开历史录音，截取音频 **40–60 秒**作单说话人英语样本。这是真实人声演讲，不是课程或会议录音。来源：[Wikimedia Commons 文件页](https://commons.wikimedia.org/wiki/File:JFK_inaugural_address.ogg)将此录音标为美国联邦政府作品及 Public Domain Mark 1.0，并列 John F. Kennedy Presidential Library & Museum 为来源；不同司法辖区的权利状况应另行核实。对照参考是[美国国家档案馆的演讲文本](https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address)。仓库不包含录音，下载的文件和输出均留在 `.local/`。
+
+本机使用 MLX Whisper tiny（`.local/whisper-tiny`）与 MiniCPM5-2B、英语识别，一次命令产生转写与纪要，退出 0，时间戳覆盖截取的 0–20 秒（相对于片段，不是原始录音时间）。录音源 5.7 MiB，源文件 SHA256 `a257580da6eda796ed1c703e545865005753f7cb20cc042e0db3c44de82274fc`；转换后片段 SHA256 `d7f78b7cd0184b86d7e6dd6ed1c40e40f0b516e50006e2b10b47ef85dd7c2d3d`。本机结果在 `.local/validation/human-speech/output/2026-11-12-audio-ge1y58po/`，仅作为一次验证，不进入 Git。
+
+**质量未通过逐字核对**：转写把原文中的 “solemn oath” / “forbears” 分别误识为 “Solomon” / “four bears”，还把 “mortal hands” 误识为 “moral hands”；“The world is very different now” 被保留。纪要引用的关键点继承了错误转写，并对截断片段做出含糊概述；没有列出行动项。引用能对应转写不代表对应录音真实内容。单次 20 秒、公开演说、单说话人测试不能证明真实课堂或会议的质量，更不能据此计算可靠的整体准确率。
+
+可复现的摘取及调用（会显式下载原始音频；需按项目模型文档准备依赖和权重）：
+
+```sh
+(
+set -eu
+mkdir -p .local/validation/human-speech
+sample_dir="$(mktemp -d .local/validation/human-speech/run.XXXXXXXX)"
+curl -fL https://upload.wikimedia.org/wikipedia/commons/d/d5/JFK_inaugural_address.ogg -o "$sample_dir/jfk-commons.ogg"
+afconvert -f WAVE -d LEI16@16000 -c 1 "$sample_dir/jfk-commons.ogg" "$sample_dir/jfk-commons-full.wav"
+.venv/bin/python - "$sample_dir" <<'PY'
+import sys
+import wave
+from pathlib import Path
+folder = Path(sys.argv[1])
+with wave.open(str(folder / 'jfk-commons-full.wav'), 'rb') as source:
+    source.setpos(40 * source.getframerate())
+    frames = source.readframes(20 * source.getframerate())
+    with wave.open(str(folder / 'jfk-commons-excerpt.wav'), 'wb') as target:
+        target.setparams(source.getparams())
+        target.writeframes(frames)
+PY
+.venv/bin/mcpm audio "$sample_dir/jfk-commons-excerpt.wav" --whisper-model .local/whisper-tiny --language en --output-dir "$sample_dir/output"
+printf '样本目录：%s\n' "$sample_dir"
+)
+```
+
+每次运行用 `mktemp -d` 创建独立目录，保留既有样本；失败后也保留新目录供排查。完整演说转换后的临时 WAV 约 26 MiB。仍需用经授权的中文真实说话人、多人及更长音频做独立验收。

@@ -111,11 +111,15 @@ def download_file(component, item, root=ROOT):
             )
         if not verify(temporary, item):
             raise SetupError(f"SHA256/size mismatch for {item['path']}; downloaded file discarded.")
-        if path.exists():
+        # The target can appear at any time after the initial existence check.
+        # A same-directory hard link publishes atomically without replacing it.
+        # os.replace here would silently clobber a file created during download.
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
             raise SetupError(
                 f"Destination appeared during download: {item['destination']}; left untouched."
-            )
-        os.replace(temporary, path)
+            ) from exc
         print(f"Verified SHA256: {item['path']}", flush=True)
         return path
     finally:

@@ -262,7 +262,7 @@ def test_history_exclusive_lock_fails_promptly_without_modifying_database(tmp_pa
         monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.25)
         start = time.monotonic()
         with pytest.raises(ToolError, match="被锁定"):
-            read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+            read_history(path, "safari", dt.date(2026, 11, 12), "Asia/Shanghai")
         assert time.monotonic() - start < 2
     finally:
         db.rollback()
@@ -433,3 +433,193 @@ def test_history_budget_exhaustion_does_not_return_partial_data():
     with pytest.raises(ToolError, match="--mode list"):
         summarize([{"id": i, "title": "title"} for i in range(1, 9)], client)
     assert client.calls <= 7
+
+
+def _chrome_locked_fixture(path):
+    """Committed synthetic fixture with a held exclusive lock and a zeroed rollback journal."""
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=PERSIST")
+    db.executescript(
+        "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+    )
+    timestamp = dt.datetime(2026, 11, 12, 8, tzinfo=dt.UTC).timestamp()
+    db.execute(
+        "INSERT INTO urls VALUES(1,?,?)", ("Committed fixture", "https://example.com/article")
+    )
+    db.execute("INSERT INTO visits VALUES(1,?)", (int((timestamp + 11644473600) * 1e6),))
+    db.commit()
+    db.execute("BEGIN EXCLUSIVE")
+    db.execute("UPDATE urls SET title = 'Uncommitted fixture' WHERE id = 1")
+    return db
+
+
+def test_locked_chrome_with_zeroed_journal_preserves_committed_fixture(tmp_path, monkeypatch):
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = _chrome_locked_fixture(path)
+    try:
+        journal = tmp_path / "History-journal"
+        assert journal.read_bytes()[:8] == bytes(8)
+        before = path.read_bytes()
+        monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
+        records = read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+        assert [row["title"] for row in records] == ["Committed fixture"]
+        assert path.read_bytes() == before
+    finally:
+        db.rollback()
+        db.close()
+
+
+@pytest.mark.parametrize("sidecar", ["-wal", "-shm", "-journal"])
+def test_chrome_locked_snapshot_rejects_unsafe_sidecars(tmp_path, sidecar):
+    from minicpm_tools.history import _copy_stable_chrome
+
+    path = tmp_path / "History"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE fixture (a TEXT)")
+    db.close()
+    other = path.with_name(path.name + sidecar)
+    payload = b"\x01\x02\x03\x04\x05\x06\x07\x08" if sidecar == "-journal" else b"live"
+    other.write_bytes(payload)
+    before = path.read_bytes()
+    with pytest.raises(ToolError):
+        _copy_stable_chrome(path, tmp_path / "copy.sqlite")
+    assert other.read_bytes() == payload
+    assert path.read_bytes() == before
+    assert not (tmp_path / "copy.sqlite").exists()
+
+
+def test_chrome_locked_snapshot_rejects_source_symlinks(tmp_path):
+    from minicpm_tools.history import _copy_stable_chrome
+
+    target = tmp_path / "original"
+    sqlite3.connect(target).close()
+    link = tmp_path / "History"
+    link.symlink_to(target)
+    with pytest.raises(ToolError, match="符号链接"):
+        _copy_stable_chrome(link, tmp_path / "copy.sqlite")
+
+
+def test_chrome_locked_snapshot_rejects_changes_during_copy(tmp_path, monkeypatch):
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE fixture(a TEXT)")
+    db.close()
+    real_copy = history.shutil.copyfileobj
+
+    def copy_then_modify(reader, writer, length):
+        real_copy(reader, writer, length)
+        with path.open("ab") as dest:
+            dest.write(b"synthetic change")
+
+    monkeypatch.setattr(history.shutil, "copyfileobj", copy_then_modify)
+    with pytest.raises(ToolError, match="变化"):
+        history._copy_stable_chrome(path, tmp_path / "copy.sqlite")
+
+
+def test_empty_chrome_journal_is_a_permitted_non_hot_state(tmp_path):
+    from minicpm_tools.history import _copy_stable_chrome
+
+    path = tmp_path / "History"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE fixture(a TEXT)")
+    db.close()
+    (tmp_path / "History-journal").write_bytes(b"")
+    copy = tmp_path / "copy.sqlite"
+    _copy_stable_chrome(path, copy)
+    assert copy.read_bytes() == path.read_bytes()
+    assert copy.stat().st_mode & 0o777 == 0o600
+
+
+def test_locked_copy_checks_source_again_after_integrity(tmp_path, monkeypatch):
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = _chrome_locked_fixture(path)
+    original = history._read_snapshot
+
+    def query_then_change(target, browser, lower, upper, check_integrity=False):
+        result = original(target, browser, lower, upper, check_integrity)
+        if check_integrity:
+            with path.open("ab") as output:
+                output.write(b"synthetic concurrent change")
+        return result
+
+    monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
+    monkeypatch.setattr(history, "_read_snapshot", query_then_change)
+    try:
+        with pytest.raises(ToolError, match="验证期间发生变化"):
+            read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_locked_copy_integrity_check_twice():
+    from minicpm_tools.history import _read_snapshot
+
+    class FakeTarget:
+        def __init__(self):
+            self.checks = 0
+
+        def execute(self, query, params=()):
+            if "integrity_check" in query:
+                self.checks += 1
+                rows = [("ok",)] if self.checks == 1 else [("synthetic damage",)]
+            else:
+                rows = []
+
+            class Result:
+                def fetchall(self):
+                    return rows
+
+            return Result()
+
+    target = FakeTarget()
+    with pytest.raises(ToolError, match="完整性检查失败"):
+        _read_snapshot(target, "chrome", 0, 1, check_integrity=True)
+    assert target.checks == 2
+
+
+@pytest.mark.parametrize("sync", ["OFF", "NORMAL", "FULL"])
+def test_chrome_copy_rejects_uncommitted_spilled_pages(tmp_path, sync):
+    """SQLite can flush dirty pages before commit; the active journal forbids copying."""
+    from minicpm_tools.history import _copy_stable_chrome
+
+    path = tmp_path / "History"
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=PERSIST")
+    db.execute("PRAGMA cache_size=3")
+    db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT)")
+    db.executemany("INSERT INTO t(val) VALUES (?)", [(("old" + str(i)) * 500,) for i in range(200)])
+    db.commit()
+    db.execute(f"PRAGMA synchronous={sync}")
+    db.execute("BEGIN EXCLUSIVE")
+    db.execute("UPDATE t SET val=REPLACE(val,'old','new')")
+    try:
+        # Database pages have spilled but the transaction is not committed.
+        assert (tmp_path / "History-journal").read_bytes()[:8] != bytes(8)
+        with pytest.raises(ToolError, match="日志处于活动状态"):
+            _copy_stable_chrome(path, tmp_path / "copy.sqlite")
+        assert not (tmp_path / "copy.sqlite").exists()
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_chrome_locked_snapshot_rejects_symlinked_parent(tmp_path):
+    from minicpm_tools.history import _copy_stable_chrome
+
+    real = tmp_path / "real"
+    real.mkdir()
+    target = real / "History"
+    db = sqlite3.connect(target)
+    db.execute("CREATE TABLE fixture(a TEXT)")
+    db.close()
+    link = tmp_path / "linked"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ToolError, match="符号链接"):
+        _copy_stable_chrome(link / "History", tmp_path / "copy.sqlite")

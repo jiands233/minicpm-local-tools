@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import os
 import re
+import shutil
 import sqlite3
+import stat
+import sys
 import tempfile
 import time
 from contextlib import closing
@@ -62,6 +66,104 @@ def clean_url(raw):
         return None
 
 
+class _HistoryLocked(ToolError):
+    """SQLite backup could not acquire a read lock within the bounded wait."""
+
+
+def _identity(st):
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _sidecar_state(path: Path):
+    """Only Chrome rollback-journal databases with an absent/zeroed journal are eligible."""
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(path) + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        raise ToolError("Chrome 历史库有 WAL/共享内存文件，不能安全复制；请关闭浏览器后重试。")
+    journal = Path(str(path) + "-journal")
+    try:
+        entry = journal.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(entry.st_mode):
+        raise ToolError("Chrome 日志不是普通文件，不能安全复制；请关闭浏览器后重试。")
+    fd = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        header = os.read(fd, 8)
+        non_hot = (opened.st_size == 0 and header == b"") or header == bytes(8)
+        if _identity(entry) != _identity(opened) or not non_hot:
+            raise ToolError("Chrome 日志处于活动状态或正在变化；请关闭浏览器后重试。")
+        if _identity(os.fstat(fd)) != _identity(opened) or _identity(journal.lstat()) != _identity(
+            opened
+        ):
+            raise ToolError("Chrome 日志正在变化；请稍后重试。")
+        return _identity(opened)
+    finally:
+        os.close(fd)
+
+
+def _copy_stable_chrome(path: Path, dest: Path):
+    """Best-effort locked-DB copy; no WAL/hot journal or observable change permitted."""
+    try:
+        if Path(os.path.abspath(path)) != path.resolve(strict=True):
+            raise ToolError("Chrome 历史库路径含符号链接；不能安全复制。")
+        entry = path.lstat()
+        if not stat.S_ISREG(entry.st_mode):
+            raise ToolError("Chrome 历史库不是普通文件或是符号链接；不能安全复制。")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(fd)
+            if _identity(entry) != _identity(before):
+                raise ToolError("Chrome 历史库正在变化；请稍后重试。")
+            header = os.read(fd, 100)
+            if (
+                len(header) < 100
+                or header[:16] != b"SQLite format 3\x00"
+                or header[18:20] != b"\x01\x01"
+            ):
+                raise ToolError("Chrome 历史库不是受支持的回滚日志格式；请关闭浏览器后重试。")
+            sidecar = _sidecar_state(path)
+            os.lseek(fd, 0, os.SEEK_SET)
+            # dest belongs to a private TemporaryDirectory, created with mode 0600.
+            out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(out, "wb") as writer, os.fdopen(os.dup(fd), "rb") as reader:
+                shutil.copyfileobj(reader, writer, 1024 * 1024)
+            if (
+                _identity(os.fstat(fd)) != _identity(before)
+                or _identity(path.lstat()) != _identity(before)
+                or _sidecar_state(path) != sidecar
+            ):
+                raise ToolError("Chrome 历史库或日志在复制期间发生变化；请稍后重试。")
+            return (_identity(before), sidecar)
+        finally:
+            os.close(fd)
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolError("无法安全复制 Chrome 历史库；请检查权限或关闭浏览器后重试。") from exc
+
+
+def _read_snapshot(target, browser, lower, upper, check_integrity=False):
+    if check_integrity:
+        result = target.execute("PRAGMA integrity_check").fetchall()
+        if result != [("ok",)]:
+            raise ToolError("Chrome 历史快照完整性检查失败；请关闭浏览器后重试。")
+    if browser == "chrome":
+        query = """SELECT v.visit_time, u.title, u.url FROM visits v JOIN urls u ON u.id=v.url
+                   WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
+    else:
+        query = """SELECT v.visit_time, v.title, i.url FROM history_visits v
+                   JOIN history_items i ON i.id=v.history_item
+                   WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
+    rows = target.execute(query, (lower, upper)).fetchall()
+    if check_integrity and target.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+        raise ToolError("Chrome 历史快照完整性检查失败；请关闭浏览器后重试。")
+    return rows
+
+
 def read_history(path: Path, browser: str, day: dt.date, timezone: str):
     zone = ZoneInfo(timezone)
     start = dt.datetime.combine(day, dt.time(), zone).timestamp()
@@ -71,42 +173,52 @@ def read_history(path: Path, browser: str, day: dt.date, timezone: str):
     if not path.is_file():
         raise ToolError(f"找不到历史库：{path}；可用 --database 指定 profile 路径。")
     with tempfile.TemporaryDirectory(prefix="mcpm-history-") as tmp:
-        # SQLite backup API includes committed WAL data, without an unsafe bare file copy.
         try:
-            with (
-                closing(
-                    sqlite3.connect(
-                        path.resolve().as_uri() + "?mode=ro",
-                        uri=True,
-                        timeout=BACKUP_RETRY_INTERVAL,
+            try:
+                with (
+                    closing(
+                        sqlite3.connect(
+                            path.resolve().as_uri() + "?mode=ro",
+                            uri=True,
+                            timeout=BACKUP_RETRY_INTERVAL,
+                        )
+                    ) as source,
+                    closing(sqlite3.connect(str(Path(tmp) / "backup.sqlite"))) as target,
+                ):
+                    busy_since = None
+
+                    def check_backup_progress(status, remaining, total):
+                        nonlocal busy_since
+                        if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                            now = time.monotonic()
+                            if busy_since is None:
+                                busy_since = now
+                            elif now - busy_since >= BACKUP_LOCK_TIMEOUT:
+                                raise _HistoryLocked("浏览器历史数据库暂时被锁定；请稍后重试。")
+                        else:
+                            busy_since = None
+
+                    source.backup(
+                        target,
+                        pages=128,
+                        progress=check_backup_progress,
+                        sleep=BACKUP_RETRY_INTERVAL,
                     )
-                ) as source,
-                closing(sqlite3.connect(str(Path(tmp) / "snapshot.sqlite"))) as target,
-            ):
-                busy_since = None
-
-                def check_backup_progress(status, remaining, total):
-                    nonlocal busy_since
-                    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                        now = time.monotonic()
-                        if busy_since is None:
-                            busy_since = now
-                        elif now - busy_since >= BACKUP_LOCK_TIMEOUT:
-                            raise ToolError("浏览器历史数据库暂时被锁定；请稍后重试。")
-                    else:
-                        busy_since = None
-
-                source.backup(
-                    target, pages=128, progress=check_backup_progress, sleep=BACKUP_RETRY_INTERVAL
+                    rows = _read_snapshot(target, browser, lower, upper)
+            except _HistoryLocked:
+                if browser != "chrome":
+                    raise
+                copy_path = Path(tmp) / "copy.sqlite"
+                identity, sidecar = _copy_stable_chrome(path, copy_path)
+                with closing(sqlite3.connect(copy_path.as_uri() + "?mode=ro", uri=True)) as target:
+                    rows = _read_snapshot(target, browser, lower, upper, check_integrity=True)
+                if _identity(path.lstat()) != identity or _sidecar_state(path) != sidecar:
+                    raise ToolError("Chrome 历史库在快照验证期间发生变化；请稍后重试。")
+                print(
+                    "注意：Chrome 历史已使用无锁近似快照，检查通过也不保证事务一致；"
+                    "需要严格一致性请关闭浏览器后重试。",
+                    file=sys.stderr,
                 )
-                if browser == "chrome":
-                    query = """SELECT v.visit_time, u.title, u.url FROM visits v JOIN urls u ON u.id=v.url
-                               WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
-                else:
-                    query = """SELECT v.visit_time, v.title, i.url FROM history_visits v
-                               JOIN history_items i ON i.id=v.history_item
-                               WHERE v.visit_time >= ? AND v.visit_time < ? ORDER BY v.visit_time"""
-                rows = target.execute(query, (lower, upper)).fetchall()
         except sqlite3.Error as exc:
             raise ToolError("历史数据库读取失败，请检查浏览器类型、访问权限和数据库结构。") from exc
     result = []

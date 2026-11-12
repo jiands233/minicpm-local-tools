@@ -5,11 +5,13 @@
 .venv/bin/mcpm shell suggest '查看8080端口由哪个进程占用'
 .venv/bin/mcpm shell suggest '把当前目录的txt后缀批量改为md，保留文件内容'
 .venv/bin/mcpm shell suggest '查看磁盘剩余空间'
+# 如果经由 uv、IDE 或其他中间进程启动，显式指定目标 shell
+.venv/bin/mcpm shell suggest '查找大文件' --shell bash
 .venv/bin/mcpm shell explain 'tar -czf archive.tar.gz notes'
 .venv/bin/mcpm shell run 'df -h'
 ```
 
-生成模式只发送 OS、zsh、当前目录字符串和用户需求，不扫描文件、不执行模型命令。模型须返回一条命令及解释。多行、格式错误和没有解释的返回会失败，不能视为成功。命令语法与行为仍需你核对，尤其 BSD/GNU 参数差异。
+生成模式只发送 OS、目标 shell、当前目录字符串和用户需求，不扫描文件、不执行模型命令。未指定 `--shell` 时先检查直接父进程（通过系统 `ps`）是否为已知 shell；无法判定时使用 `SHELL` 中的默认登录 shell，并明确提示它可能与当前终端不同。两者均不可用时建议模式要求指定 `--shell`。`--shell` 支持 zsh、bash、fish、sh、ksh、tcsh 和 csh；手动指定会覆盖自动识别。模型须返回一条命令及解释。多行、格式错误和没有解释的返回会失败，不能视为成功。命令语法与行为仍需你核对，尤其 BSD/GNU 参数差异。
 
 `--execute` 或 `shell run` 才进入执行流程，并要求交互终端中输入 `EXECUTE`；回车取消。无 `--yes`，不接受管道确认。执行使用参数数组和固定系统二进制路径，不调用 shell，30 秒超时。支持 pwd/ls/df/du/lsof/whoami/uname/sw_vers/date 的有限只读调用；组合符、重定向、命令替换、通配符、删除/权限命令、常见凭据路径会被拒绝。
 
@@ -22,3 +24,5 @@
 第二轮真实验收曾出现：只要求查找大文件，模型却在 `find` 中附带 `-exec ... mv`。这条命令未被执行，但原验收脚本只检查了 `-delete`，错误判为通过。现对“查找、查看”等明确只读需求做保守检查：发现可疑 `find` 动作、常见写入/执行程序或 shell 组合与重定向时，拒绝展示并报错；显式重命名等需求仍允许预览，但显示风险提示。规则是启发式，既可能漏判也可能误拦，不构成完整 shell 安全分析。执行白名单仍独立生效。
 
 针对这个合成需求，真实 MiniCPM5-2B 重跑一次得到 `find . -type f -size +100M`，未执行；验收脚本现仅接受固定的当前目录只读 find 结构，并用 `-exec`、`-execdir`、`-ok`、`-delete`、输出到文件、重定向和命令替换作为反例做回归测试。单次成功不保证后续输出始终正确。
+
+2026-11-12 上下文修复：此前请求总是告诉模型使用 zsh，即使调用者处于 bash/fish。现优先识别直接父 shell，并提供 `--shell` 明确覆盖；中间进程无法识别时的登录 shell 回退会显示来源，不能保证就是当前交互 shell。本机真实模型使用 `--shell bash` 生成了 `df -h .`，只预览，未执行。
