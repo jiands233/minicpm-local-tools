@@ -13,7 +13,7 @@ uv sync --extra audio
 必须先准备一个**本地 MLX Whisper 模型目录**，内含 `config.json` 和 `weights.safetensors` 或 `weights.npz`。推理时不会从 Hugging Face 下载模型。可以把已经下载的 Hugging Face `snapshots/<revision>` 目录传入。目录名或 `refs/main` 文件存在不代表权重完整。
 
 ```sh
-uv run mcpm audio /path/to/lesson.m4a \
+.venv/bin/mcpm audio /path/to/lesson.m4a \
   --whisper-model /path/to/whisper-model \
   --language zh --output-dir ./local-output/audio
 ```
@@ -23,7 +23,7 @@ uv run mcpm audio /path/to/lesson.m4a \
 文本摘要沿用工具集的本地模型配置。只转写、不需要 MiniCPM 服务：
 
 ```sh
-uv run mcpm audio /path/to/lesson.wav \
+.venv/bin/mcpm audio /path/to/lesson.wav \
   --whisper-model /path/to/whisper-model --no-summary \
   --output-dir ./local-output/audio
 ```
@@ -35,11 +35,11 @@ uv run mcpm audio /path/to/lesson.wav \
 JSON 结构是 `{"segments":[{"start":0,"end":3.5,"text":"原文"}]}`，时间单位为秒。按开始时间排序，不能为空。无需重新运行 Whisper：
 
 ```sh
-uv run mcpm audio --transcript-json examples/audio-transcript.json \
+.venv/bin/mcpm audio --transcript-json examples/audio-transcript.json \
   --output-dir ./local-output/audio --no-summary
 
 # 摘要模型运行后，同一份输入生成纪要
-uv run mcpm audio --transcript-json examples/audio-transcript.json \
+.venv/bin/mcpm audio --transcript-json examples/audio-transcript.json \
   --output-dir ./local-output/audio
 ```
 

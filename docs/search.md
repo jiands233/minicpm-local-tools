@@ -13,10 +13,10 @@ export MINICPM_EMBED_MODEL=bge-m3
 export MINICPM_OCR_URL=http://127.0.0.1:11434/v1
 export MINICPM_OCR_MODEL=minicpm-ocr
 
-uv run mcpm search index ./examples/search-corpus --index ./.data/search.sqlite
-uv run mcpm search query '海洋哺乳动物' --index ./.data/search.sqlite
-uv run mcpm search query '矩阵求逆的笔记' --index ./.data/search.sqlite --rewrite --explain
-uv run mcpm search query '课程作业截止日期' --index ./.data/search.sqlite --open 1
+.venv/bin/mcpm search index ./examples/search-corpus --index ./.data/search.sqlite
+.venv/bin/mcpm search query '海洋哺乳动物' --index ./.data/search.sqlite
+.venv/bin/mcpm search query '矩阵求逆的笔记' --index ./.data/search.sqlite --rewrite --explain
+.venv/bin/mcpm search query '课程作业截止日期' --index ./.data/search.sqlite --open 1
 ```
 
 `--open 1` 用 macOS 默认应用打开第一个结果的原文件。结果同时显示 PDF 页码（打开应用时不保证跳转到该页）、原始摘录、评分和文字来源。`--explain` 让 MiniCPM 从摘录中选择一句原文依据，只有逐字匹配原文的引用才显示；其余输出显示“无法确认相关性”。选中原文也不保证相关，仍须核对。`--rewrite` 只接受简短单行，格式不合格时保留原始查询并显示提示。
@@ -24,9 +24,9 @@ uv run mcpm search query '课程作业截止日期' --index ./.data/search.sqlit
 尚未安装模型时，先使用明确标注的关键词模式检验文件流程：
 
 ```sh
-uv run mcpm search index ./examples/search-corpus --index ./.data/keyword.sqlite --mode keyword --no-ocr
-uv run mcpm search query '鲸鱼' --index ./.data/keyword.sqlite
-uv run mcpm search query '矩阵' --index ./.data/keyword.sqlite
+.venv/bin/mcpm search index ./examples/search-corpus --index ./.data/keyword.sqlite --mode keyword --no-ocr
+.venv/bin/mcpm search query '鲸鱼' --index ./.data/keyword.sqlite
+.venv/bin/mcpm search query '矩阵' --index ./.data/keyword.sqlite
 ```
 
 关键词模式不等于语义检索；只支持词汇重叠，中文使用相邻双字匹配。它不会自动升级成语义索引。准备好 embedding 服务后，使用 `--mode semantic --replace` 重建；查询时换 embedding 模型也必须重建。索引只在提取和 embedding 全部成功后替换旧版本；失败或 Ctrl+C 保留旧索引。
@@ -59,13 +59,13 @@ uv run mcpm search query '矩阵' --index ./.data/keyword.sqlite
 可复现命令（输出索引若已经存在，确认后加 `--replace`；示例生成器拒绝覆盖文件）：
 
 ```sh
-uv run --extra pdf python examples/search_make_fixtures.py .local/search-fixtures
-uv run mcpm search index examples/search-corpus --index .local/search-semantic.sqlite --no-ocr
-uv run mcpm search query '海洋中呼吸空气的动物' --index .local/search-semantic.sqlite --top-k 1 --json
-uv run mcpm search query '求逆的数学学习资料' --index .local/search-semantic.sqlite --top-k 1
-uv run mcpm search index .local/search-fixtures --index .local/search-ocr-semantic.sqlite --max-pages 1
-uv run mcpm search query '什么时候交数学作业' --index .local/search-ocr-semantic.sqlite --top-k 1
-uv run mcpm search query '海洋里的蓝鲸吃什么' --index .local/search-ocr-semantic.sqlite --top-k 1
+.venv/bin/python examples/search_make_fixtures.py .local/search-fixtures
+.venv/bin/mcpm search index examples/search-corpus --index .local/search-semantic.sqlite --no-ocr
+.venv/bin/mcpm search query '海洋中呼吸空气的动物' --index .local/search-semantic.sqlite --top-k 1 --json
+.venv/bin/mcpm search query '求逆的数学学习资料' --index .local/search-semantic.sqlite --top-k 1
+.venv/bin/mcpm search index .local/search-fixtures --index .local/search-ocr-semantic.sqlite --max-pages 1
+.venv/bin/mcpm search query '什么时候交数学作业' --index .local/search-ocr-semantic.sqlite --top-k 1
+.venv/bin/mcpm search query '海洋里的蓝鲸吃什么' --index .local/search-ocr-semantic.sqlite --top-k 1
 ```
 
 本次 BGE 权重来源为 [GPUStack 转换仓库固定版本](https://huggingface.co/gpustack/bge-m3-GGUF/tree/2d48f1737679ad900d5c26c5aad5410e9c70fdca)，是 BAAI/bge-m3 的 GGUF 转换，不是 MiniCPM 模型。下载文件大小 `437778496` 字节，已按仓库 LFS 信息验证 SHA256：
@@ -88,7 +88,7 @@ PARAMETER num_ctx 8192
 修改后实际运行以下命令，仍命中扫描通知第 1 页，并返回通过逐字检查的依据：“请在周五下午三点前提交矩阵求逆作业。”
 
 ```sh
-uv run mcpm search query '什么时候交数学作业' --index .local/search-ocr-semantic.sqlite --top-k 1 --rewrite --explain --json
+.venv/bin/mcpm search query '什么时候交数学作业' --index .local/search-ocr-semantic.sqlite --top-k 1 --rewrite --explain --json
 ```
 
 ## 自动化验证边界
@@ -96,3 +96,9 @@ uv run mcpm search query '什么时候交数学作业' --index .local/search-ocr
 `tests/test_search.py` 使用确定性的 fake embedding/OCR 客户端验证排序、模型一致性、批次限制、页码、扫描页分支、符号链接边界、索引失败回滚和临时文件清理；它不能证明真实 MiniCPM OCR 准确率或 embedding 检索质量。
 
 `examples/search-corpus` 中两个文本文件与生成的扫描 PDF 是专门编写的演示资料，不是用户真实课程数据。真实模型结果见上表；自动化单元测试不替代这些实际调用。复杂排版、低清扫描、长文档和用户真实资料尚未评测。
+
+### 重建时保护现有文件
+
+`--replace` 只用于重建本工具、同一根目录的现有索引；程序会先检查 SQLite 结构、版本和根目录，拒绝覆盖普通文件、其他数据库、损坏文件、符号链接，以及有 WAL / 日志的数据库。已有 v1 索引可继续重建；新建索引带有应用标识。构建完成后程序再次检查目标，发现路径、设备、inode、大小或修改时间已改变时中止并保留目标；原来不存在的目标使用独占创建，避免覆盖构建时新出现的文件。
+
+系统没有提供这里使用的跨进程原子“校验后替换”操作：对已存在索引，最后一次检查与替换之间仍有极小的竞态。不要同时让其他进程修改或替换同一索引；关闭其他使用者后再重建。验证使用临时目录，覆盖了普通文件、其他数据库、损坏数据库、旧版索引、不同根目录、符号链接、日志和构建过程中目标发生变化。另用本地 BGE-M3 对合成文档完成索引、重建和查询；没有读取个人文档。

@@ -55,7 +55,7 @@
 ```sh
 macos/.build/release/MiniCPMClipboard --self-test
 macos/.build/release/MiniCPMClipboard --self-test-hotkey
-uv run python -m unittest discover -s tests -p test_clipboard.py
+.venv/bin/python -m unittest discover -s tests -p test_clipboard.py
 ```
 
 `--self-test-hotkey` 验证五个菜单动作、Carbon 全局快捷键注册和应用内事件分发；不发送实际键盘输入，不读取或写入系统剪贴板，因此不等同于真实键盘端到端验证。

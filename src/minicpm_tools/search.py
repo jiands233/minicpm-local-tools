@@ -7,16 +7,82 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 from collections import Counter
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .client import LocalClient
 from .common import ToolError
+
+INDEX_APPLICATION_ID = 0x4D43504D
+
+
+def _file_identity(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _existing_index_identity(index: Path, root: Path):
+    """Validate a local index before replacing it; never treat an arbitrary file as an index."""
+    try:
+        before = index.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ToolError("索引目标不是普通文件或是符号链接，拒绝覆盖。")
+        fd = os.open(index, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            if _file_identity(before) != _file_identity(opened):
+                raise ToolError("索引文件正在变化，拒绝覆盖。")
+            # An active SQLite WAL/journal may change what the main file means;
+            # do not ignore it or touch another process's live database.
+            if any(Path(str(index) + suffix).exists() for suffix in ("-wal", "-journal")):
+                raise ToolError("索引存在 SQLite WAL/日志，请先关闭其他使用该索引的程序。")
+            with closing(
+                sqlite3.connect(index.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+            ) as db:
+                app_id = db.execute("PRAGMA application_id").fetchone()[0]
+                if app_id not in (0, INDEX_APPLICATION_ID):
+                    raise ToolError("目标是其他应用的数据库，拒绝覆盖。")
+                tables = {
+                    row[0]
+                    for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    if not row[0].startswith("sqlite_")
+                }
+                if tables != {"metadata", "chunks"}:
+                    raise ToolError("目标不是本工具的索引数据库，拒绝覆盖。")
+                for table, expected in (
+                    ("metadata", ["key", "value"]),
+                    ("chunks", ["id", "path", "page", "body", "source", "vector"]),
+                ):
+                    if [row[1] for row in db.execute(f"PRAGMA table_info({table})")] != expected:
+                        raise ToolError("目标索引结构不匹配，拒绝覆盖。")
+                metadata = {
+                    k: json.loads(v) for k, v in db.execute("SELECT key,value FROM metadata")
+                }
+                if (
+                    metadata.get("version") != 1
+                    or metadata.get("mode") not in {"keyword", "semantic"}
+                    or metadata.get("root") != str(root)
+                ):
+                    raise ToolError("目标不是此资料目录的有效索引，拒绝覆盖。")
+                if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                    raise ToolError("目标索引损坏，拒绝覆盖。")
+            if _file_identity(os.fstat(fd)) != _file_identity(opened) or _file_identity(
+                index.lstat()
+            ) != _file_identity(opened):
+                raise ToolError("索引文件正在变化，拒绝覆盖。")
+            return _file_identity(opened)
+        finally:
+            os.close(fd)
+    except ToolError:
+        raise
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise ToolError("无法验证原索引（文件可能损坏或不是本工具索引），拒绝覆盖。") from exc
 
 
 @dataclass
@@ -139,6 +205,9 @@ def index_folder(
         raise ToolError("索引路径不能是符号链接。")
     if index.exists() and not replace:
         raise ToolError("索引已存在；检查路径后使用 --replace 重建。")
+    existing_identity = (
+        _existing_index_identity(index, root) if replace and index.exists() else None
+    )
     client = client or LocalClient.from_env()
     index.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{index.name}.", dir=index.parent)
@@ -151,6 +220,7 @@ def index_folder(
         db.executescript("""CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, page INTEGER,
         body TEXT NOT NULL, source TEXT NOT NULL, vector TEXT);""")
+        db.execute(f"PRAGMA application_id = {INDEX_APPLICATION_ID}")
         for directory, dirs, names in os.walk(root, followlinks=False):
             dirs[:] = sorted(
                 d for d in dirs if not d.startswith(".") and not (Path(directory) / d).is_symlink()
@@ -220,7 +290,9 @@ def index_folder(
         )
         db.commit()
         db.close()
-        if replace:
+        if existing_identity is not None:
+            if _existing_index_identity(index, root) != existing_identity:
+                raise ToolError("原索引在重建过程中发生变化，拒绝覆盖。")
             os.replace(temporary, index)
         else:
             # Atomic publish without clobbering a concurrently created index.

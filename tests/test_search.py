@@ -228,3 +228,98 @@ def test_verbose_rewrite_falls_back_to_original_query(corpus, capsys):
     hits = search_index(index, "biology", client=VerboseClient(), rewrite=True)
     assert hits[0].path.endswith("marine.md")
     assert "使用原始查询" in capsys.readouterr().err
+
+
+def test_replace_refuses_unrelated_non_index_files(corpus):
+    root, index = corpus
+    original = b"valuable user notes"
+    index.write_bytes(original)
+    with pytest.raises(ToolError, match="拒绝覆盖"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert index.read_bytes() == original
+
+
+def test_replace_refuses_other_sqlite_and_corrupt_index(corpus):
+    root, index = corpus
+    with sqlite3.connect(index) as db:
+        db.execute("CREATE TABLE private_data (value TEXT)")
+        db.execute("INSERT INTO private_data VALUES ('keep me')")
+    original = index.read_bytes()
+    with pytest.raises(ToolError, match="拒绝覆盖"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert index.read_bytes() == original
+    index.unlink()
+    index.write_bytes(b"SQLite format 3\x00broken")
+    original = index.read_bytes()
+    with pytest.raises(ToolError, match="拒绝覆盖"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert index.read_bytes() == original
+
+
+def test_replace_requires_original_root_and_preserves_legacy(corpus, tmp_path):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    with sqlite3.connect(index) as db:
+        db.execute("PRAGMA application_id=0")  # v1 files predating the marker
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "other.txt").write_text("other unrelated directory")
+    before = index.read_bytes()
+    with pytest.raises(ToolError, match="拒绝覆盖"):
+        index_folder(other, index, mode="keyword", client=FakeClient(), replace=True)
+    assert index.read_bytes() == before
+    index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert search_index(index, "biology", client=FakeClient())
+
+
+def test_replace_rejects_symlink_and_live_wal(corpus, tmp_path):
+    root, index = corpus
+    target = tmp_path / "target.sqlite"
+    index_folder(root, target, mode="keyword", client=FakeClient())
+    original = target.read_bytes()
+    index.symlink_to(target)
+    with pytest.raises(ToolError, match="符号链接"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert target.read_bytes() == original
+    index.unlink()
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    wal = Path(str(index) + "-wal")
+    wal.write_bytes(b"journal")
+    original = index.read_bytes()
+    with pytest.raises(ToolError, match="WAL"):
+        index_folder(root, index, mode="keyword", client=FakeClient(), replace=True)
+    assert index.read_bytes() == original and wal.read_bytes() == b"journal"
+
+
+def test_replace_rejects_path_changed_during_rebuild(corpus, tmp_path):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", client=FakeClient())
+    moved = tmp_path / "old-index.sqlite"
+    replacement = b"another process wrote this file"
+
+    def change_path(_):
+        if index.exists() and not moved.exists():
+            index.rename(moved)
+            index.write_bytes(replacement)
+
+    with pytest.raises(ToolError, match="拒绝覆盖"):
+        index_folder(
+            root, index, mode="keyword", client=FakeClient(), replace=True, progress=change_path
+        )
+    assert index.read_bytes() == replacement
+    assert search_index(moved, "biology", client=FakeClient())
+    assert list(index.parent.glob(".index.sqlite.*")) == []
+
+
+def test_replace_new_path_wont_clobber_file_created_during_build(corpus):
+    root, index = corpus
+
+    def create_target(_):
+        if not index.exists():
+            index.write_text("concurrent file")
+
+    with pytest.raises(FileExistsError):
+        index_folder(
+            root, index, mode="keyword", client=FakeClient(), replace=True, progress=create_target
+        )
+    assert index.read_text() == "concurrent file"
