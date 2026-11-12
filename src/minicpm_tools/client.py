@@ -122,11 +122,11 @@ class LocalClient:
             if mime is None:
                 raise ToolError("图像请求只支持 PNG 或 JPEG。")
             content = [
-                {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"},
                 },
+                {"type": "text", "text": prompt},
             ]
         messages = ([{"role": "system", "content": system}] if system else []) + [
             {"role": "user", "content": content}

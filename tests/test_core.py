@@ -1,5 +1,6 @@
 import datetime as dt
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -98,7 +99,14 @@ def test_execution_blocks_risky_commands(command):
 
 
 def test_execution_uses_system_binary():
-    assert execution_argv("ls -lh .") == ["/bin/ls", "-lh", "."]
+    if not any((directory / "ls").is_file() for directory in (Path("/usr/bin"), Path("/bin"))):
+        pytest.skip("no ls binary at the trusted system paths")
+    argv = execution_argv("ls -lh .")
+    binary = Path(argv[0])
+    assert binary.is_absolute()
+    assert binary.parent in {Path("/usr/bin"), Path("/bin")}
+    assert binary.name == "ls" and binary.is_file()
+    assert argv[1:] == ["-lh", "."]
 
 
 def test_noninteractive_execution_never_runs(monkeypatch, tmp_path):

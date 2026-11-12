@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "minicpm-local-tools"
 version = "0.1.0"
 description = "Five private, local-first MiniCPM tools for macOS"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.28,<1"]
 

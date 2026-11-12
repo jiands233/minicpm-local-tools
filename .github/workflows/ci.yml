@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install locked Python dependencies
+        run: uv sync --locked --extra dev --extra pdf
+      - name: Lint
+        run: .venv/bin/ruff check src tests script
+      - name: Run Python tests
+        run: .venv/bin/pytest -q
+      - name: Build the native macOS app
+        if: matrix.os == 'macos-latest' && matrix.python == '3.12'
+        run: swift build --package-path macos -c release
