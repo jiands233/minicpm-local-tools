@@ -14,7 +14,7 @@ import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from .client import LocalClient
@@ -27,18 +27,99 @@ BACKUP_RETRY_INTERVAL = 0.1
 HISTORY_BATCH_BYTES = 3600
 HISTORY_BATCH_ITEMS = 60
 
-SENSITIVE = re.compile(
-    r"login|signin|sign-in|oauth|callback|reset|password|token|checkout|payment|account|auth",
+# Match whole path components (or separated words such as reset-password),
+# rather than substrings: /authors and /authority are ordinary public pages.
+SENSITIVE_PATH = re.compile(
+    r"(?<![a-z0-9])(?:login|log[-_]?in|signin|sign[-_]?in|oauth2?|callback|"
+    r"reset|password|token|checkout|payment|account|auth(?:entication|orize|orization)?)(?![a-z0-9])",
     re.IGNORECASE,
 )
+# Query values are stripped in the rendered URL, but explicit credential fields
+# are still excluded from the report. Exact keys avoid misclassifying `author`.
+SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "oauth",
+        "oauth_token",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "reset_token",
+        "password",
+        "passwd",
+        "pass",
+        "secret",
+        "client_secret",
+        "api_key",
+        "apikey",
+        "key",
+        "code",
+        "state",
+    }
+)
+SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?:^|[?&;\s])(?:access_token|refresh_token|id_token|api_key|apikey|"
+    r"password|passwd|client_secret|token)\s*=",
+    re.IGNORECASE,
+)
+
+
+def _decode_safely(value: str, *, plus: bool = False) -> str:
+    """Decode bounded layers; fail closed when percent escapes keep changing."""
+    decode = unquote_plus if plus else unquote
+    for _ in range(4):
+        next_value = decode(value, errors="strict")
+        if next_value == value:
+            return value
+        value = next_value
+    if decode(value, errors="strict") != value:
+        raise ValueError("excessive URL encoding")
+    return value
+
+
+def _has_sensitive_query(query: str) -> bool:
+    # Treat both separators as potentially meaningful, even though parse_qsl
+    # normally accepts only '&'; the output never retains unknown parameters.
+    fields = re.split(r"[&;]", query)
+    if len(fields) > 100:
+        raise ValueError("too many query fields")
+    for field in fields:
+        raw_key, _, raw_value = field.partition("=")
+        key = _decode_safely(raw_key, plus=True).casefold()
+        value = _decode_safely(raw_value, plus=True)
+        normalized_key = re.sub(r"[^a-z0-9]", "", key)
+        if (
+            key in SENSITIVE_QUERY_KEYS
+            or normalized_key
+            in {
+                "accesstoken",
+                "refreshtoken",
+                "idtoken",
+                "clientsecret",
+                "apikey",
+                "authorizationcode",
+            }
+            or normalized_key.endswith("token")
+            or SENSITIVE_PATH.search(key)
+            or SENSITIVE_ASSIGNMENT.search(value)
+        ):
+            return True
+    return False
 
 
 def clean_url(raw):
     try:
         url = urlsplit(raw)
-        if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.hostname
+            or url.username is not None
+            or url.password is not None
+        ):
             return None
-        if SENSITIVE.search(url.path) or SENSITIVE.search(url.query):
+        if SENSITIVE_PATH.search(_decode_safely(url.path)) or _has_sensitive_query(url.query):
             return None
         # Preserve only known public resource selectors. Unknown query fields and
         # fragments can contain credentials or private search text, so omit them.

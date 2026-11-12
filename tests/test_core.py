@@ -623,3 +623,59 @@ def test_chrome_locked_snapshot_rejects_symlinked_parent(tmp_path):
     link.symlink_to(real, target_is_directory=True)
     with pytest.raises(ToolError, match="符号链接"):
         _copy_stable_chrome(link / "History", tmp_path / "copy.sqlite")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://example.org/authors/alice", "https://example.org/authors/alice"),
+        ("https://example.org/authority/report", "https://example.org/authority/report"),
+        ("https://example.org/article?author=alice", "https://example.org/article"),
+        ("https://example.org/article?%61uthor=alice&author=bob", "https://example.org/article"),
+        ("https://example.org/tokenization/guide", "https://example.org/tokenization/guide"),
+        ("https://example.org/oauth/authorize", None),
+        ("https://example.org/auth/login", None),
+        ("https://example.org/reset-password", None),
+        ("https://example.org/%74oken/details", None),
+        ("https://example.org/%2561uth/%256cogin", None),
+        ("https://example.org/AuTh/Login", None),
+        ("https://example.org/article?access_token=secret", None),
+        ("https://example.org/article?author=a&%74oken=secret", None),
+        ("https://example.org/article?author=a;%2574oken=secret", None),
+        ("https://example.org/article?author=a&Access-Token=secret", None),
+        ("https://example.org/article?author=a&session=secret", "https://example.org/article"),
+        ("https://example.org/article?redirect=access_token%3Dsecret", None),
+        ("https://example.org/%252525252574oken/details", None),
+        ("https://@example.org/article", None),
+    ],
+)
+def test_history_url_filter_handles_boundaries_and_encoding(url, expected):
+    assert clean_url(url) == expected
+
+
+def test_history_author_pages_are_retained_while_credentials_are_filtered(tmp_path):
+    from minicpm_tools.history import render
+
+    database = tmp_path / "History"
+    with sqlite3.connect(database) as db:
+        db.executescript(
+            "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); "
+            "CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+        )
+        moment = int((dt.datetime(2026, 11, 12, 12, tzinfo=dt.UTC).timestamp() + 11644473600) * 1e6)
+        fixtures = [
+            ("Author page", "https://example.org/authors/alice"),
+            ("Public article", "https://example.org/article?author=alice&session=private"),
+            ("Credential page", "https://example.org/article?%74oken=secret"),
+            ("Authentication", "https://example.org/oauth/authorize"),
+        ]
+        for number, (title, url) in enumerate(fixtures, 1):
+            db.execute("INSERT INTO urls VALUES(?,?,?)", (number, title, url))
+            db.execute("INSERT INTO visits VALUES(?,?)", (number, moment))
+    records = read_history(database, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+    assert [entry["title"] for entry in records] == ["Author page", "Public article"]
+    output = render(records, dt.date(2026, 11, 12), "Asia/Shanghai")
+    assert "https://example.org/authors/alice" in output
+    assert "https://example.org/article" in output
+    assert "session=private" not in output and "token=secret" not in output
+    assert "链接参数已隐藏" in output

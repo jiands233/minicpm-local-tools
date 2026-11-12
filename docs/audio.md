@@ -137,3 +137,44 @@ printf '样本目录：%s\n' "$sample_dir"
 ```
 
 每次运行用 `mktemp -d` 创建独立目录，保留既有样本；失败后也保留新目录供排查。完整演说转换后的临时 WAV 约 26 MiB。仍需用经授权的中文真实说话人、多人及更长音频做独立验收。
+
+### 真实人声的 Whisper 模型选择对照（2026-11-12）
+
+在同一台 Apple Silicon Mac、同一段上面的 20 秒 JFK 英语演说片段、同一 CLI `--language en --no-summary` 设置下，分别单次运行本地多语言 MLX Whisper tiny、base 和 small。**这些调用只验证转写，没有运行 MiniCPM 摘要**；各输出均使用独立目录，时间戳相对片段开始。
+
+| 本地模型 | 权重大小 | 单次 CLI 墙钟时间 | 与国家档案馆文本对照的观察 |
+| --- | ---: | ---: | --- |
+| tiny | 约 71 MiB | 0.85 秒 | 将 oath 一词附近误识为 “Solomon”，将 “forbears” 误写为 “four bears”，并将 “mortal” 误写为 “moral”。 |
+| base | 约 137 MiB | 1.81 秒 | 正确识别 “forebears”（与参考中的 “forbears” 属不同拼写）及 “mortal”，但 oath 一词附近仍误为 “solomoth”。 |
+| small | 约 459 MiB | 1.58 秒 | 正确识别 “forebears” 与 “mortal”，但 oath 附近误为 “Solomon”，并误写前面的 “our” 为 “are”。 |
+
+耗时包含 CLI 启动和音频解码；每个模型只运行一次，无法比较冷启动、性能或普遍准确率。这个短片段是单人英语历史演说，录音音质、口音与真实课程会议不同。三个模型都仍有实质错误；base/small 在这几个词上改善，不能保证在中文、嘈杂音频、多人或其他样本上更好。纪要以转写为输入，错误仍会传入摘要，重要任务、时间与人名应听录音核对。以上对照的来源与限制见上一节，参考原稿的版权及本地模型的许可由其发布方说明；样本和转写不提交到仓库。
+
+对照用的 base/small 是可选手动下载的社区转换权重，**不在本项目 `script/models.json` 的固定安装清单里，也不是预装或默认模型**。下载来源及当前校验值如下（`config.json` SHA256 是按该固定版本文件实算，模型权重 SHA256 是该版本 Hugging Face LFS 元数据与实际文件校验值）：
+
+| 模型 | 固定版本及来源 | `config.json` SHA256 | `weights.npz` SHA256 |
+| --- | --- | --- | --- |
+| base | [mlx-community/whisper-base-mlx @ 1e3e249](https://huggingface.co/mlx-community/whisper-base-mlx/tree/1e3e249fb8d01c655324bd6841b1deadffd6d04c) | `737220a6d958b3ad48e78f840fa991556266983c84ea2ca40e413389c62e4c2f` | `2f57d5f3ef473054c638961f90716f4ee415e8108de81313eccb2c5fd62eff0b` |
+| small | [mlx-community/whisper-small-mlx @ 45f3915](https://huggingface.co/mlx-community/whisper-small-mlx/tree/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e) | `e8f58e638208af66d5d5d67801259dc7a12d199e971967a9f9d33a8e3635668e` | `55b6674c9b339702d486e2b1573839a66f8ec8f821ed2886993ef717a86b09f5` |
+
+例如，以下命令在项目根目录**新建独立目录**下载 base，验证两个文件后才用它运行先前样本；先将 `sample_audio` 设为上一节输出的样本路径，或你自行指定的音频路径。下载失败或校验失败会停止，已创建的目录会保留以供检查，不覆盖已有模型：
+
+```sh
+(
+set -eu
+sample_audio="/absolute/path/to/jfk-commons-excerpt.wav"  # 改为上一节输出的实际路径
+mkdir -p .local
+model_dir="$(mktemp -d "$PWD/.local/whisper-base.XXXXXXXX")"
+model_url="https://huggingface.co/mlx-community/whisper-base-mlx/resolve/1e3e249fb8d01c655324bd6841b1deadffd6d04c"
+curl -fsSL "$model_url/config.json" -o "$model_dir/config.json"
+curl -fsSL "$model_url/weights.npz" -o "$model_dir/weights.npz"
+(cd "$model_dir" && printf '%s  %s\n' \
+  737220a6d958b3ad48e78f840fa991556266983c84ea2ca40e413389c62e4c2f config.json \
+  2f57d5f3ef473054c638961f90716f4ee415e8108de81313eccb2c5fd62eff0b weights.npz | shasum -a 256 -c -)
+.venv/bin/mcpm audio "$sample_audio" \
+  --whisper-model "$model_dir" --language en --output-dir .local/validation/human-speech/base-recheck --no-summary
+printf '已校验模型目录：%s\n' "$model_dir"
+)
+```
+
+若要运行 small，请使用表中固定版本及两个 SHA256 执行同样校验，并显式传入其本地路径。切换模型后请重新检查实际音频，不要把本节输出当作质量担保。项目仍保留较小的 tiny 演示配置；模型选择应按你的语言、准确性、运行时长和磁盘空间自行评估。

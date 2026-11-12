@@ -96,6 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panelShortcut: NSTextField?
     var panelButtons: [NSButton] = []
     var statusMessage = "就绪 · 请先复制文字或截图"
+    var shortcutError: String?
     let testingHotkey = CommandLine.arguments.contains("--self-test-hotkey")
     var hotkeyTriggers = 0
     var current = UserDefaults.standard.string(forKey: "action") ?? "todos"
@@ -115,7 +116,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.title = "CPM"
         makeMenu()
         var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
+        let installCode = InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
             guard let context else { return OSStatus(eventNotHandledErr) }
             let app = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
             DispatchQueue.main.async {
@@ -124,7 +125,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        registerShortcut()
+        if reportHandlerInstallation(installCode, installed: handler != nil) {
+            registerShortcut()
+        }
         if !testingHotkey { openPanel() }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -209,16 +212,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func updatePanel() {
-        panelStatus?.stringValue = statusMessage
+        panelStatus?.stringValue = displayedStatus
         let name = actions.first(where: { $0.0 == current })?.1 ?? "提取待办"
         let language = UserDefaults.standard.string(forKey: "language") ?? "中文"
         panelShortcut?.stringValue = "快捷键 \(shortcutLabels[shortcut]) · 当前动作：\(name) · 翻译目标：\(language)\n可从菜单栏 CPM 调整快捷键和翻译目标。"
         for button in panelButtons { button.isEnabled = !busy }
     }
+    var displayedStatus: String {
+        guard let shortcutError else { return statusMessage }
+        return "\(statusMessage) · \(shortcutError)"
+    }
     func setStatus(_ message: String) {
         statusMessage = message
-        status?.title = message
+        status?.title = displayedStatus
         updatePanel()
+    }
+    func setShortcutError(_ message: String?) {
+        shortcutError = message
+        status?.title = displayedStatus
+        updatePanel()
+    }
+    @discardableResult func reportHandlerInstallation(_ code: OSStatus, installed: Bool) -> Bool {
+        guard code == noErr && installed else {
+            setShortcutError("快捷键事件处理不可用，请重启应用（\(code)）")
+            return false
+        }
+        return true
+    }
+    func reportShortcutRegistration(_ code: OSStatus, registered: Bool) {
+        if code == noErr && registered { setShortcutError(nil) }
+        else { setShortcutError("快捷键注册失败，请换一个组合（\(code)）") }
     }
     @objc func panelAction(_ sender: NSButton) {
         guard !busy, actions.indices.contains(sender.tag) else { return }
@@ -237,7 +260,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let panelItem = NSMenuItem(title: "打开工具面板", action: #selector(openPanel), keyEquivalent: "")
         panelItem.target = self
         menu.addItem(panelItem)
-        status = NSMenuItem(title: statusMessage, action: nil, keyEquivalent: "")
+        status = NSMenuItem(title: displayedStatus, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
         menu.addItem(NSMenuItem.separator())
@@ -271,10 +294,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updatePanel()
     }
     func registerShortcut() {
-        if let hotkey { UnregisterEventHotKey(hotkey) }
+        if let hotkey { UnregisterEventHotKey(hotkey); self.hotkey = nil }
+        guard handler != nil else {
+            setShortcutError("快捷键事件处理不可用，请重启应用。")
+            return
+        }
         let modifiers: [UInt32] = [UInt32(controlKey | optionKey), UInt32(cmdKey | shiftKey), UInt32(cmdKey | optionKey)]
         let code = RegisterEventHotKey(UInt32(testingHotkey ? kVK_F19 : kVK_ANSI_C), testingHotkey ? UInt32(controlKey | cmdKey) : modifiers[shortcut], EventHotKeyID(signature: 0x4D43504D, id: 1), GetApplicationEventTarget(), 0, &hotkey)
-        if code != noErr { setStatus("快捷键已被占用，请换一个组合（\(code)）") }
+        reportShortcutRegistration(code, registered: hotkey != nil)
     }
     @objc func setShortcut(_ sender: NSMenuItem) {
         guard shortcutLabels.indices.contains(sender.tag) else { return }
@@ -346,6 +373,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let handler { RemoveEventHandler(handler) }
     }
 }
+// Tests the same status transition methods as production without registering a
+// hotkey, touching the system pasteboard, or creating an app/window instance.
+if CommandLine.arguments.contains("--self-test-shortcut-status") {
+    let state = AppDelegate()
+    state.setStatus("失败 · 模型不可用")
+    state.reportShortcutRegistration(-1, registered: false)
+    guard state.displayedStatus.contains("模型不可用"), state.displayedStatus.contains("注册失败") else { fail("registration failure hid model failure") }
+    state.reportShortcutRegistration(noErr, registered: true)
+    guard state.displayedStatus == "失败 · 模型不可用" else { fail("registration success did not preserve model failure") }
+    state.setStatus("正在处理：截图转文字")
+    state.reportShortcutRegistration(-2, registered: false)
+    state.reportShortcutRegistration(noErr, registered: true)
+    guard state.displayedStatus == "正在处理：截图转文字" else { fail("registration success hid in-progress status") }
+    guard !state.reportHandlerInstallation(-3, installed: false), state.displayedStatus.contains("事件处理不可用") else { fail("handler installation failure not shown") }
+    guard state.reportHandlerInstallation(noErr, installed: true) else { fail("valid handler rejected") }
+    state.reportShortcutRegistration(noErr, registered: true)
+    guard state.shortcutError == nil, state.displayedStatus == "正在处理：截图转文字" else { fail("handler recovery did not preserve in-progress status") }
+    emit(["ok": true, "checks": ["registration failure and recovery", "model error preserved", "in-progress status preserved", "handler failure and recovery"], "uses_general_clipboard": false]); exit(0)
+}
+
 let application = NSApplication.shared
 let delegate = AppDelegate()
 application.delegate = delegate
