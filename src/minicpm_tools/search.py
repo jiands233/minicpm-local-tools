@@ -518,7 +518,7 @@ def search_index(
     if not index.is_file():
         raise ToolError(f"索引不存在：{_terminal_text(index)}")
     try:
-        with sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True)) as db:
             metadata = {
                 key: json.loads(value)
                 for key, value in db.execute("SELECT key,value FROM metadata")

@@ -158,6 +158,34 @@ def test_keyword_mode_requires_no_model_calls(corpus):
         search_index(index, "biology", client=client, mode="semantic")
 
 
+def test_query_closes_database_after_success_and_read_error(corpus, tmp_path, monkeypatch):
+    root, index = corpus
+    index_folder(root, index, mode="keyword", ocr=False)
+    corrupt = tmp_path / "corrupt.sqlite"
+    corrupt.write_text("not a database", encoding="utf-8")
+    connections = []
+    real_connect = sqlite3.connect
+
+    class TrackedConnection(sqlite3.Connection):
+        closed = False
+
+        def close(self):
+            self.closed = True
+            super().close()
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs, factory=TrackedConnection)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    assert search_index(index, "biology", mode="keyword")
+    assert connections[-1].closed
+    with pytest.raises(ToolError, match="无法读取此索引"):
+        search_index(corrupt, "biology", mode="keyword")
+    assert len(connections) == 2 and connections[-1].closed
+
+
 def test_keyword_no_ocr_cli_works_with_broken_model_configuration(corpus):
     root, index = corpus
     env = os.environ | {

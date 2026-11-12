@@ -68,6 +68,32 @@ def test_chrome_wal_snapshot_and_day_boundaries(tmp_path):
     db.close()
 
 
+def test_chrome_wal_snapshot_excludes_uncommitted_visits(tmp_path):
+    path = tmp_path / "History"
+    with sqlite3.connect(path) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.executescript(
+            "CREATE TABLE urls(id INTEGER, title TEXT, url TEXT); "
+            "CREATE TABLE visits(url INTEGER, visit_time INTEGER);"
+        )
+        timestamp = (
+            int(dt.datetime(2026, 11, 12, tzinfo=dt.UTC).timestamp()) + 11644473600
+        ) * 1_000_000
+        writer.execute("INSERT INTO urls VALUES(1, 'committed', 'https://example.com/one')")
+        writer.execute("INSERT INTO visits VALUES(1, ?)", (timestamp,))
+        writer.commit()
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO urls VALUES(2, 'pending', 'https://example.com/two')")
+        writer.execute("INSERT INTO visits VALUES(2, ?)", (timestamp + 1_000_000,))
+
+        before_commit = read_history(path, "chrome", dt.date(2026, 11, 12), "UTC")
+        assert [entry["title"] for entry in before_commit] == ["committed"]
+
+        writer.commit()
+        after_commit = read_history(path, "chrome", dt.date(2026, 11, 12), "UTC")
+        assert [entry["title"] for entry in after_commit] == ["committed", "pending"]
+
+
 def test_history_rejects_invented_references():
     class Fake:
         def chat(self, *args, **kwargs):
@@ -170,9 +196,15 @@ def test_fall_back_day_disambiguates_repeated_hour_and_includes_full_day(tmp_pat
     path = tmp_path / "History"
     with sqlite3.connect(path) as db:
         if browser == "chrome":
-            db.executescript("CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); CREATE TABLE visits(url INTEGER,visit_time INTEGER);")
+            db.executescript(
+                "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); "
+                "CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+            )
         else:
-            db.executescript("CREATE TABLE history_items(id INTEGER,url TEXT); CREATE TABLE history_visits(history_item INTEGER,title TEXT,visit_time REAL);")
+            db.executescript(
+                "CREATE TABLE history_items(id INTEGER,url TEXT); "
+                "CREATE TABLE history_visits(history_item INTEGER,title TEXT,visit_time REAL);"
+            )
         for number, moment in enumerate(moments, 1):
             url = f"https://example.com/{number}"
             if browser == "chrome":
@@ -183,6 +215,48 @@ def test_fall_back_day_disambiguates_repeated_hour_and_includes_full_day(tmp_pat
                 db.execute("INSERT INTO history_visits VALUES(?,?,?)", (number, str(number), moment.timestamp() - 978307200))
     records = read_history(path, browser, day, "America/New_York")
     assert [record["time"] for record in records] == ["00:00", "01:30 -0400", "01:30 -0500", "23:59"]
+
+
+@pytest.mark.parametrize("browser", ["chrome", "safari"])
+def test_spring_forward_day_includes_only_its_23_hours(tmp_path, browser):
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("America/New_York")
+    day = dt.date(2026, 3, 8)
+    moments = [
+        dt.datetime(2026, 3, 7, 23, 59, tzinfo=zone),
+        dt.datetime(2026, 3, 8, 0, 0, tzinfo=zone),
+        dt.datetime(2026, 3, 8, 1, 59, tzinfo=zone),
+        dt.datetime(2026, 3, 8, 3, 0, tzinfo=zone),
+        dt.datetime(2026, 3, 8, 23, 59, tzinfo=zone),
+        dt.datetime(2026, 3, 9, 0, 0, tzinfo=zone),
+    ]
+    path = tmp_path / "History"
+    with sqlite3.connect(path) as db:
+        if browser == "chrome":
+            db.executescript(
+                "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); "
+                "CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+            )
+        else:
+            db.executescript(
+                "CREATE TABLE history_items(id INTEGER,url TEXT); "
+                "CREATE TABLE history_visits(history_item INTEGER,title TEXT,visit_time REAL);"
+            )
+        for number, moment in enumerate(moments, 1):
+            url = f"https://example.com/{number}"
+            if browser == "chrome":
+                db.execute("INSERT INTO urls VALUES(?,?,?)", (number, str(number), url))
+                timestamp = (int(moment.timestamp()) + 11644473600) * 1_000_000
+                db.execute("INSERT INTO visits VALUES(?,?)", (number, timestamp))
+            else:
+                db.execute("INSERT INTO history_items VALUES(?,?)", (number, url))
+                db.execute(
+                    "INSERT INTO history_visits VALUES(?,?,?)",
+                    (number, str(number), moment.timestamp() - 978307200),
+                )
+    records = read_history(path, browser, day, "America/New_York")
+    assert [record["time"] for record in records] == ["00:00", "01:59", "03:00", "23:59"]
 
 
 def test_chat_disables_thinking_and_rejects_truncation(monkeypatch):
