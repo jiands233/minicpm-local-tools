@@ -380,6 +380,9 @@ def search_index(
         else:
             print("模型改写格式不符合要求，使用原始查询。", file=sys.stderr)
     qtokens = Counter(tokens(query))
+    # Text uses CJK bigrams to limit noisy matches, but a one-character query
+    # must still be able to find that character inside a longer CJK run.
+    single_cjk = {token for token in qtokens if len(token) == 1 and "\u3400" <= token <= "\u9fff"}
     qvector = None
     if mode != "keyword":
         if metadata["embedding_model"] != _embedding_model(client):
@@ -411,7 +414,10 @@ def search_index(
             ):
                 raise ToolError("索引中的文件状态无效，请重建索引。")
             source_status[path] = None if saved is None else saved != current
-        terms = Counter(tokens(body + " " + actual.name))
+        searchable = body + " " + actual.name
+        terms = Counter(tokens(searchable))
+        for character in single_cjk:
+            terms[character] = searchable.count(character)
         lexical = sum(min(count, terms[token]) for token, count in qtokens.items()) / max(
             1, sum(qtokens.values())
         )

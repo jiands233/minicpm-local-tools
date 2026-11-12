@@ -137,7 +137,9 @@ def run(args: argparse.Namespace) -> int:
         )
         result = transform(text, args.action, client, args.language)
     else:
-        snapshot = bridge_call("--snapshot")
+        snapshot = bridge_call(
+            "--snapshot-image" if args.action in ("ocr", "image-todos") else "--snapshot-text"
+        )
         result = process_snapshot(snapshot, args.action, client, args.language)
     if args.apply:
         assert snapshot is not None

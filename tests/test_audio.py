@@ -114,6 +114,50 @@ def test_summary_failure_keeps_transcript(tmp_path, monkeypatch):
     assert not (runs[0] / 'summary.md').exists()
 
 
+@pytest.mark.parametrize('field,bad_value', [
+    ('key_points', None), ('questions', 'missing'), ('actions', None),
+])
+def test_missing_or_malformed_model_section_fails_and_keeps_transcript(
+    tmp_path, monkeypatch, field, bad_value
+):
+    from minicpm_tools import audio
+    source = tmp_path / 'input.json'
+    source.write_text(json.dumps({'segments': [{'start': 0, 'end': 3, 'text': '小王明天提交报告。'}]}))
+
+    class IncompleteClient:
+        def chat(self, prompt, system=''):
+            if '只提取尚未完成的待办' in prompt:
+                response = {'actions': [{'segment_id': 's1', 'owner': '小王', 'due': '明天'}]}
+            else:
+                response = {'overview': '报告安排', 'key_points': ['s1'], 'questions': []}
+            if field in response:
+                if bad_value is None:
+                    del response[field]
+                else:
+                    response[field] = bad_value
+            return json.dumps(response, ensure_ascii=False)
+
+    monkeypatch.setattr(audio.LocalClient, 'from_env', lambda: IncompleteClient())
+    args = argparse.Namespace(input=None, transcript_json=source, chunk_chars=5000, output_dir=tmp_path / 'out', no_summary=False)
+    with pytest.raises(ToolError, match=field):
+        handle(args)
+    run, = args.output_dir.iterdir()
+    assert (run / 'transcript.json').exists()
+    assert not (run / 'summary.md').exists()
+
+
+def test_explicit_empty_model_sections_are_valid():
+    class EmptyActionsClient:
+        def chat(self, prompt, system=''):
+            if '只提取尚未完成的待办' in prompt:
+                return json.dumps({'actions': []})
+            return json.dumps({'key_points': ['s1'], 'questions': []})
+    notes = summarize([Segment(0, 1, '已经讨论了报告。')], EmptyActionsClient())
+    assert notes['actions'] == []
+    assert notes['questions'] == []
+    assert len(notes['key_points']) == 1
+
+
 def test_template_only_output_is_failure_not_success():
     class TemplateClient:
         def chat(self, prompt, system=''):

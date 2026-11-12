@@ -117,7 +117,21 @@ class ClipboardTests(unittest.TestCase):
             patch.object(clipboard.LocalClient, "from_env", return_value=FakeClient()),
         ):
             clipboard.run(args)
-        bridge.assert_called_once_with("--snapshot")
+        bridge.assert_called_once_with("--snapshot-text")
+
+    def test_image_actions_request_only_image_snapshot(self):
+        for action in ("ocr", "image-todos"):
+            args = argparse.Namespace(
+                action=action, apply=False, text=None, file=None, image=None, stdin=False,
+                language="中文",
+            )
+            snapshot = {"image_png": base64.b64encode(b"test PNG bytes").decode()}
+            with (
+                patch.object(clipboard, "bridge_call", return_value=snapshot) as bridge,
+                patch.object(clipboard.LocalClient, "from_env", return_value=FakeClient()),
+            ):
+                clipboard.run(args)
+            bridge.assert_called_once_with("--snapshot-image")
 
 
 if __name__ == "__main__":

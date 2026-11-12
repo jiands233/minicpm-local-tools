@@ -100,3 +100,51 @@ def test_suggestion_uses_explicit_shell_in_model_prompt(monkeypatch, capsys, tmp
     )
     assert "shell：fish" in model.prompt
     assert "终端上下文：fish（用户指定）" in capsys.readouterr().out
+
+
+def test_prompt_targets_actual_operating_system(monkeypatch, tmp_path):
+    from minicpm_tools import shell
+
+    class Capture:
+        def chat(self, prompt):
+            self.prompt = prompt
+            return json.dumps({"command": "df -h", "explanation": "查看磁盘"})
+
+    model = Capture()
+    monkeypatch.setattr(shell.platform, "system", lambda: "Linux")
+    shell.generate("查看磁盘", tmp_path, model, shell="bash")
+    assert "系统：Linux，shell：bash" in model.prompt
+    assert "macOS 命令" not in model.prompt
+
+
+@pytest.mark.parametrize("character", ["\x1b", "\x9b", "\u202e", "\t", "\n"])
+def test_control_characters_in_commands_are_rejected(character):
+    from minicpm_tools.shell import validate_command
+
+    with pytest.raises(ToolError, match="控制字符"):
+        validate_command(f"ls {character}file")
+
+
+@pytest.mark.parametrize("action", ["suggest", "explain"])
+def test_untrusted_model_text_does_not_send_terminal_controls(
+    action, monkeypatch, capsys, tmp_path
+):
+    from types import SimpleNamespace
+
+    from minicpm_tools import shell
+
+    class EscapeModel:
+        def chat(self, *args, **kwargs):
+            text = "\x1b]52;c;dGVzdA==\x07\n解释\u202e"
+            if action == "explain":
+                return text
+            return json.dumps({"command": "pwd", "explanation": text})
+
+    monkeypatch.setattr(shell.LocalClient, "from_env", lambda: EscapeModel())
+    shell.run(
+        SimpleNamespace(action=action, text="pwd", cwd=str(tmp_path), shell="bash", execute=False)
+    )
+    output = capsys.readouterr().out
+    assert "\x1b" not in output and "\x07" not in output and "\u202e" not in output
+    assert r"\x1b" in output and r"\x07" in output and r"\u202e" in output
+    assert "\n解释" in output

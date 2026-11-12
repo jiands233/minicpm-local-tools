@@ -29,7 +29,7 @@ export MINICPM_OCR_MODEL=minicpm-ocr
 .venv/bin/mcpm search query '矩阵' --index ./.data/keyword.sqlite
 ```
 
-关键词模式不等于语义检索；只支持词汇重叠，中文使用相邻双字匹配。它不会自动升级成语义索引。准备好 embedding 服务后，使用 `--mode semantic --replace` 重建；查询时换 embedding 模型也必须重建。索引只在提取和 embedding 全部成功后替换旧版本；失败或 Ctrl+C 保留旧索引。
+关键词模式不等于语义检索；只支持词汇重叠，中文多字查询使用相邻双字匹配，单字查询也能匹配文中的该字。它不会自动升级成语义索引。准备好 embedding 服务后，使用 `--mode semantic --replace` 重建；查询时换 embedding 模型也必须重建。索引只在提取和 embedding 全部成功后替换旧版本；失败或 Ctrl+C 保留旧索引。
 
 ## PDF、范围和限制
 

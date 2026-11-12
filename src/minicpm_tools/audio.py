@@ -184,6 +184,16 @@ def parse_model_json(text: str) -> dict:
     return value
 
 
+def require_model_lists(value: dict, fields: tuple[str, ...], chunk: int) -> None:
+    """Do not turn an omitted/malformed model section into a claimed empty section."""
+    missing = [field for field in fields if not isinstance(value.get(field), list)]
+    if missing:
+        raise ToolError(
+            f"第 {chunk} 块摘要模型输出缺少有效数组字段：{', '.join(missing)}；"
+            "未生成不完整纪要，转写已保留。"
+        )
+
+
 def grounded_items(items: object, sources: dict[str, Segment], *, action=False) -> tuple[list[dict], int]:
     """Reject unknown citations; actions display source wording, never invented tasks."""
     if not isinstance(items, list):
@@ -291,11 +301,13 @@ def summarize(segments: list[Segment], client: LocalClient, chunk_chars: int = 5
 资料：\n"""
         encoded = json.dumps(data, ensure_ascii=False)
         value = parse_model_json(client.chat(prompt + encoded, system=system))
+        require_model_lists(value, ("key_points", "questions"), index)
         # Task extraction is a separate, short pass: the 2B model missed explicit
         # English commitments when asked to classify all four sections at once.
         action_prompt = """只提取尚未完成的待办。逐条查看每个片段，找出所有明确未来要做或还需要做的事情；英文 will / need to、中文 将 / 明天 / 需要 等可能表示待办。已经完成的不是待办。只输出 JSON 对象，唯一字段 actions 为数组。每项包括 segment_id、owner、due。负责人和时间从原文逐字复制，没有则写未提及。不需要解释，不要遗漏明确待办。资料：\n"""
         action_value = parse_model_json(client.chat(action_prompt + encoded, system=system))
-        value["actions"] = action_value.get("actions", [])
+        require_model_lists(action_value, ("actions",), index)
+        value["actions"] = action_value["actions"]
         overview = value.get("overview")
         if isinstance(overview, str) and overview.strip():
             notes["overviews"].append(overview.strip())

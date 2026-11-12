@@ -27,17 +27,19 @@ if CommandLine.arguments.contains("--self-test-timeouts") {
           watchdogSeconds("1e300", action: "ocr") == nil else { fail("Timeout calculation failed") }
     emit(["ok": true, "checks": ["default", "long custom", "sequential requests", "short custom", "invalid", "very large"]]); exit(0)
 }
-func snapshot(_ board: NSPasteboard) throws -> [String: Any] {
+func snapshot(_ board: NSPasteboard, text: Bool = true, image: Bool = true) throws -> [String: Any] {
     let count = board.changeCount
     var result: [String: Any] = ["change_count": count]
-    if let text = board.string(forType: .string) { result["text"] = text }
-    var png = board.data(forType: .png)
-    if png == nil, let tiff = board.data(forType: .tiff), let bitmap = NSBitmapImageRep(data: tiff) {
-        png = bitmap.representation(using: .png, properties: [:])
-    }
-    if let data = png {
-        guard data.count <= 20 * 1024 * 1024 else { throw BridgeError.message("截图超过 20 MB，请缩小图片。") }
-        result["image_png"] = data.base64EncodedString()
+    if text, let value = board.string(forType: .string) { result["text"] = value }
+    if image {
+        var png = board.data(forType: .png)
+        if png == nil, let tiff = board.data(forType: .tiff), let bitmap = NSBitmapImageRep(data: tiff) {
+            png = bitmap.representation(using: .png, properties: [:])
+        }
+        if let data = png {
+            guard data.count <= 20 * 1024 * 1024 else { throw BridgeError.message("截图超过 20 MB，请缩小图片。") }
+            result["image_png"] = data.base64EncodedString()
+        }
     }
     guard board.changeCount == count else { throw BridgeError.message("读取时剪贴板发生变化，请重试。") }
     return result
@@ -49,8 +51,10 @@ func replace(_ board: NSPasteboard, expected: Int, text: String) throws {
     board.clearContents()
     guard board.setString(text, forType: .string) else { throw BridgeError.message("剪贴板写入失败。") }
 }
-if CommandLine.arguments.contains("--snapshot") {
-    do { emit(try snapshot(.general)); exit(0) }
+if CommandLine.arguments.contains(where: { ["--snapshot", "--snapshot-text", "--snapshot-image"].contains($0) }) {
+    let text = !CommandLine.arguments.contains("--snapshot-image")
+    let image = !CommandLine.arguments.contains("--snapshot-text")
+    do { emit(try snapshot(.general, text: text, image: image)); exit(0) }
     catch BridgeError.message(let text) { fail(text) }
     catch { fail("读取剪贴板失败。") }
 }
@@ -80,7 +84,19 @@ if CommandLine.arguments.contains("--self-test") {
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         board.clearContents(); board.setData(bitmap.representation(using: .png, properties: [:])!, forType: .png)
         guard (try snapshot(board))["image_png"] is String else { fail("image snapshot failed") }
-        emit(["ok": true, "checks": ["text snapshot", "text replacement", "change conflict", "PNG snapshot"], "uses_general_clipboard": false]); exit(0)
+        board.clearContents()
+        board.setString("混合内容", forType: .string)
+        board.setData(Data(count: 20 * 1024 * 1024 + 1), forType: .png)
+        let textOnly = try snapshot(board, image: false)
+        guard textOnly["text"] as? String == "混合内容", textOnly["image_png"] == nil else { fail("text-only snapshot failed") }
+        do { _ = try snapshot(board, text: false); fail("oversized image was accepted") }
+        catch BridgeError.message { }
+        board.clearContents()
+        board.setString("混合内容", forType: .string)
+        board.setData(bitmap.representation(using: .png, properties: [:])!, forType: .png)
+        let imageOnly = try snapshot(board, text: false)
+        guard imageOnly["image_png"] is String, imageOnly["text"] == nil else { fail("image-only snapshot failed") }
+        emit(["ok": true, "checks": ["text snapshot", "text replacement", "change conflict", "PNG snapshot", "mixed content by action", "oversized image isolation"], "uses_general_clipboard": false]); exit(0)
     } catch { fail("Native pasteboard self-test failed: \(error)") }
 }
 

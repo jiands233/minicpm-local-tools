@@ -75,6 +75,26 @@ def test_keyword_mode_requires_no_model_calls(corpus):
         search_index(index, "biology", client=client, mode="semantic")
 
 
+def test_keyword_search_finds_single_chinese_character_inside_words(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "marine.txt").write_text("蓝鲸是海洋哺乳动物。", encoding="utf-8")
+    (root / "other.txt").write_text("海豹生活在海边。", encoding="utf-8")
+    index = tmp_path / "index.sqlite"
+    client = FakeClient()
+    index_folder(root, index, mode="keyword", client=client)
+
+    hits = search_index(index, "鲸", client=client)
+    assert [Path(hit.path).name for hit in hits] == ["marine.txt"]
+    assert hits[0].score == 1
+    assert search_index(index, "鲸 鲸", client=client)[0].score == 0.5
+    assert search_index(index, "象", client=client) == []
+    assert [Path(hit.path).name for hit in search_index(index, "蓝鲸", client=client)] == [
+        "marine.txt"
+    ]
+    assert client.batches == []
+
+
 def test_failed_rebuild_and_interruption_preserve_existing_index(corpus):
     root, index = corpus
     index_folder(root, index, client=FakeClient())
