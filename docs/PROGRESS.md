@@ -115,3 +115,4 @@
 - 移除系统 `ls` 测试对 `/bin/ls` 的固定依赖，验证二进制来自可信系统路径且参数不变；若路径不存在则跳过。新增 GitHub Actions：Ubuntu/macOS × Python 3.11/3.12 运行测试与 Ruff，macOS 额外执行 Swift release 构建；CI 不包含真实模型/GUI 验收。
 - 按用户选择为项目代码添加 MIT 许可证及包元数据；第三方依赖与模型仍遵循各自许可证，模型权重不纳入仓库。补充首轮和目前远端状态的时间标注，消除开发记录歧义。
 - 当前 Mac 本地 Python 测试、真实 OCR 测试及 Ruff 通过；Linux 和 GitHub Actions 以云端执行结果为准。物理快捷键、Safari 权限与真实长会议仍未验收。
+- GitHub Actions 首次实跑：提交 `3eb80fa` 的 [CI 运行](https://github.com/jiands233/minicpm-local-tools/actions/runs/43160900218)四组均通过（Ubuntu/macOS × Python 3.11/3.12；macOS 3.12 还通过 Swift release 构建）。这不覆盖真实模型或 GUI。
