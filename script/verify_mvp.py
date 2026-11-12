@@ -145,6 +145,8 @@ def clipboard(run):
 def search(run):
     text_root = run.directory / "text-corpus"
     shutil.copytree(ROOT / "examples/search-corpus", text_root)
+    removed_file = text_root / "remove-on-update.txt"
+    removed_file.write_text("This synthetic document will be deleted.", encoding="utf-8")
     index = run.directory / "text.sqlite"
     metadata = json.loads(
         run.cli("search", "index", text_root, "--index", index, label="semantic-text-index")
@@ -163,6 +165,27 @@ def search(run):
         require(hits and Path(hits[0]["path"]).name == filename, f"Wrong top text hit: {question}")
         require(Path(hits[0]["path"]).is_file(), "Search result source missing")
         results[question] = hits
+    # Exercise changed, deleted, new and unchanged sources with the real
+    # embedding service. The copied corpus is unique to this acceptance run.
+    (text_root / "algebra.txt").write_text("线性代数课程更新了矩阵求逆作业。", encoding="utf-8")
+    removed_file.unlink()
+    (text_root / "new-note.txt").write_text("新的合成天文笔记记录了木星。", encoding="utf-8")
+    updated = json.loads(
+        run.cli(
+            "search", "index", text_root, "--index", index, "--replace", "--incremental",
+            label="semantic-incremental-update",
+        )
+    )
+    require(updated["files"] == 3 and updated["reused_files"] == 1,
+            "Incremental update did not reuse exactly the unchanged file")
+    with sqlite3.connect(index) as db:
+        indexed = db.execute("SELECT path,body FROM chunks").fetchall()
+    require(
+        {Path(path).name for path, _ in indexed} == {"marine.md", "algebra.txt", "new-note.txt"},
+        "Incremental index retained a deleted file or missed a source",
+    )
+    require(any("矩阵求逆作业" in body for _, body in indexed), "Changed text not indexed")
+    require(any("木星" in body for _, body in indexed), "New text not indexed")
     pdf_root = run.directory / "pdf-corpus"
     run.command(
         [sys.executable, str(ROOT / "examples/search_make_fixtures.py"), str(pdf_root)],
@@ -188,7 +211,7 @@ def search(run):
                 "OCR lost notice facts",
             )
         results[question] = hits
-    return {"text_index": metadata, "pdf_index": pdf_meta, "queries": results}
+    return {"text_index": metadata, "incremental_update": updated, "pdf_index": pdf_meta, "queries": results}
 
 
 def multichunk_audio(run):

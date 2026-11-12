@@ -549,6 +549,49 @@ def test_incremental_reuses_unchanged_and_handles_changed_added_deleted(corpus):
     assert not search_index(index, "deleted", mode="keyword", client=client)
 
 
+def test_incremental_matches_full_rebuild_for_mixed_documents(tmp_path):
+    pdfium = pytest.importorskip("pypdfium2")
+    pytest.importorskip("PIL")
+    helper = runpy.run_path(str(Path(__file__).parents[1] / "examples/search_make_fixtures.py"))
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "long.txt").write_text("Marine biology notes about whales and oceans. " * 100)
+    (root / "changed.md").write_text("Original algebra material.")
+    (root / "deleted.txt").write_text("Content later removed.")
+    (root / "text.pdf").write_bytes(helper["text_pdf"](["Marine biology notes about whales and oceans."]))
+    document = pdfium.PdfDocument.new()
+    page = document.new_page(200, 200)
+    page.close()
+    document.save(root / "scan.pdf")
+    document.close()
+
+    incremental = tmp_path / "incremental.sqlite"
+    complete = tmp_path / "complete.sqlite"
+    index_folder(root, incremental, client=FakeClient())
+    (root / "changed.md").write_text("New linear algebra material and matrix practice.")
+    (root / "deleted.txt").unlink()
+    (root / "added.txt").write_text("New notes on biology and ocean life.")
+
+    incremental_client = FakeClient()
+    updated = index_folder(root, incremental, client=incremental_client, replace=True, incremental=True)
+    full_client = FakeClient()
+    rebuilt = index_folder(root, complete, client=full_client)
+    assert updated["reused_files"] == 3  # Multichunk text, text PDF, OCR PDF.
+    assert incremental_client.images == [] and len(full_client.images) == 1
+    assert sum(map(len, incremental_client.batches)) == 2
+    assert sum(map(len, full_client.batches)) > 2
+    assert {key: updated[key] for key in ("files", "chunks", "ocr_pages", "dimension")} == {
+        key: rebuilt[key] for key in ("files", "chunks", "ocr_pages", "dimension")
+    }
+    with sqlite3.connect(incremental) as left, sqlite3.connect(complete) as right:
+        statement = "SELECT path,page,body,source,vector FROM chunks ORDER BY id"
+        assert left.execute(statement).fetchall() == right.execute(statement).fetchall()
+    for query in ("biology", "矩阵", "作业"):
+        left_hits = search_index(incremental, query, client=FakeClient(), top_k=10)
+        right_hits = search_index(complete, query, client=FakeClient(), top_k=10)
+        assert left_hits == right_hits
+
+
 @pytest.mark.parametrize("change", ["legacy", "embedding_model", "embedding_url", "ocr_model", "ocr_url", "max_pages", "no_ocr", "mode"])
 def test_incremental_incompatible_or_legacy_settings_rebuild_every_file(corpus, change):
     root, index = corpus

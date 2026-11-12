@@ -126,7 +126,35 @@ sh examples/audio_demo.sh /absolute/path/to/whisper-model
 
 该测试的多块概述出现了重复句，现仅对完全相同的概述做稳定去重，不让模型自由合并或推断；这是事后根据输出做的代码调整，已使用单元测试验证，未重跑整段。仅当原文、完整起止时间和（行动项的）负责人、截止时间都相同时才合并重复引用；不同结束时间或不同指派会分别保留。完全同一转写段中出现多次相同文字时，Whisper 没有提供分句位置或独立时间戳，本工具仍可能合并这些无法区分的重复项；请以完整转写为准。这份重复样本不能证明真实长会议摘要完整、准确或能识别所有任务。
 
-### 真实人声小样本（2026-11-12）
+### 真实中文人声小样本（2026-11-12）
+
+使用 [Ming-3.0-asr 固定版本示例及归属说明](https://github.com/inclusionAI/Ming-3.0-asr/blob/6141e8c552815db724d8df0f72c9d865c547a1ea/examples/cases/README.md)提供的 Common Voice 15 普通话录音 `common_voice_zh-CN_22099416`：该项目标注其来源为 Mozilla Common Voice，许可为 CC0。音频为 5.904 秒单人朗读，不是自然会议或课堂；未尝试识别说话人身份。该示例项目提供的参考文本为“漓江和湘江有秦代开凿的灵渠沟通”。这里是对比其提供的参考文本，并非对录音逐字人工听审。样本及输出仅存本机忽略目录 `.local/validation/human-speech/zh-commonvoice.KuiCD3WR/`，不纳入仓库。
+
+同一音频在本机分别使用 MLX Whisper tiny 和 large-v3-turbo，指定 `--language zh --no-summary`：
+
+| 模型 | 此次转写 | 与参考文本对照 |
+| --- | --- | --- |
+| tiny | 李江和鄉江有情帶開找的零局溝通 | 地名和“秦代开凿的灵渠”等多处识别错误；繁体仅是书写形式，不自动算错。 |
+| large-v3-turbo | 离江和湘江有琴代开凿的灵渠沟通 | “漓江”识别为“离江”，“秦代”识别为“琴代”，其余字面与参考一致。 |
+
+这只是单条短朗读，不可据此推断中文会议、口音、长音频或整体准确率；大模型仍会误识同音字。此次仅验收转写，未测试摘要、行动项或语义归属。源 WAV 为 48 kHz 单声道 PCM，SHA256 `978e46a482b8b2f3a2eb1ad1d5ee61b9eb0e3668e2627ec1b49d809a12bf21da`；工具实际通过本机解码器转换音频后推理。
+
+可复现 tiny 的方法（显式下载小音频，不下载模型，每次新建目录）：
+
+```sh
+(
+set -eu
+mkdir -p .local/validation/human-speech
+sample_dir="$(mktemp -d .local/validation/human-speech/zh-commonvoice.XXXXXXXX)"
+curl -fL https://raw.githubusercontent.com/inclusionAI/Ming-3.0-asr/6141e8c552815db724d8df0f72c9d865c547a1ea/examples/cases/audio/chinese_common_voice.wav -o "$sample_dir/chinese.wav"
+shasum -a 256 "$sample_dir/chinese.wav"
+.venv/bin/mcpm audio "$sample_dir/chinese.wav" --whisper-model .local/whisper-tiny --language zh --no-summary --output-dir "$sample_dir/tiny"
+)
+```
+
+将 `--whisper-model` 改为事先准备好的 large-v3-turbo 本地目录可对照该模型；权重取得与校验说明见下方真实人声模型对比部分。模型、下载音频和输出均不进入 Git。
+
+### 真实英语人声小样本（2026-11-12）
 
 为补充合成语音测试，另用肯尼迪 1961 年就职演说的公开历史录音，截取音频 **40–60 秒**作单说话人英语样本。这是真实人声演讲，不是课程或会议录音。来源：[Wikimedia Commons 文件页](https://commons.wikimedia.org/wiki/File:JFK_inaugural_address.ogg)将此录音标为美国联邦政府作品及 Public Domain Mark 1.0，并列 John F. Kennedy Presidential Library & Museum 为来源；不同司法辖区的权利状况应另行核实。对照参考是[美国国家档案馆的演讲文本](https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address)。仓库不包含录音，下载的文件和输出均留在 `.local/`。
 
