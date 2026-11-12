@@ -471,7 +471,9 @@ def test_locked_chrome_with_zeroed_journal_preserves_committed_fixture(tmp_path,
         assert journal.read_bytes()[:8] == bytes(8)
         before = path.read_bytes()
         monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
-        records = read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+        records = read_history(
+            path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai", allow_approximate_snapshot=True
+        )
         assert [row["title"] for row in records] == ["Committed fixture"]
         assert path.read_bytes() == before
     finally:
@@ -560,7 +562,13 @@ def test_locked_copy_checks_source_again_after_integrity(tmp_path, monkeypatch):
     monkeypatch.setattr(history, "_read_snapshot", query_then_change)
     try:
         with pytest.raises(ToolError, match="验证期间发生变化"):
-            read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+            read_history(
+                path,
+                "chrome",
+                dt.date(2026, 11, 12),
+                "Asia/Shanghai",
+                allow_approximate_snapshot=True,
+            )
     finally:
         db.rollback()
         db.close()
@@ -687,3 +695,134 @@ def test_history_author_pages_are_retained_while_credentials_are_filtered(tmp_pa
     assert "https://example.org/article" in output
     assert "session=private" not in output and "token=secret" not in output
     assert "链接参数已隐藏" in output
+
+
+def _journal_off_spilled_history(path, *, stale_journal):
+    db = sqlite3.connect(path)
+    assert db.execute("PRAGMA journal_mode=OFF").fetchone()[0].lower() == "off"
+    db.execute("PRAGMA cache_size=3")
+    db.executescript(
+        "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+    )
+    timestamp = int((dt.datetime(2026, 11, 12, 8, tzinfo=dt.UTC).timestamp() + 11644473600) * 1e6)
+    db.executemany(
+        "INSERT INTO urls VALUES(?,?,?)",
+        [(i, "committed" * 180, f"https://example.com/{i}") for i in range(1, 201)],
+    )
+    db.executemany("INSERT INTO visits VALUES(?,?)", [(i, timestamp) for i in range(1, 201)])
+    db.commit()
+    db.execute("BEGIN EXCLUSIVE")
+    db.execute("UPDATE urls SET title=replace(title,'committed','uncommitted')")
+    if stale_journal:
+        Path(str(path) + "-journal").write_bytes(bytes(8))
+    return db
+
+
+@pytest.mark.parametrize("stale_journal", [False, True])
+def test_locked_chrome_default_rejects_journal_off_spilled_pages_without_model(
+    tmp_path, monkeypatch, stale_journal
+):
+    from argparse import Namespace
+
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = _journal_off_spilled_history(path, stale_journal=stale_journal)
+    monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
+    monkeypatch.setattr(
+        history.LocalClient, "from_env", lambda: pytest.fail("model must not be called")
+    )
+    args = Namespace(
+        timezone="Asia/Shanghai",
+        date="2026-11-12",
+        database=str(path),
+        browser="chrome",
+        mode="summary",
+        output_dir=str(tmp_path / "output"),
+        allow_approximate_snapshot=False,
+    )
+    try:
+        with pytest.raises(ToolError, match="被锁定.*一致快照"):
+            history.run(args)
+        assert not (tmp_path / "output").exists()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("stale_journal", [False, True])
+def test_approximate_snapshot_warns_and_labels_possible_uncommitted_content(
+    tmp_path, monkeypatch, capsys, stale_journal
+):
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = _journal_off_spilled_history(path, stale_journal=stale_journal)
+    monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
+    info = {}
+    try:
+        entries = read_history(
+            path,
+            "chrome",
+            dt.date(2026, 11, 12),
+            "Asia/Shanghai",
+            allow_approximate_snapshot=True,
+            snapshot_info=info,
+        )
+        assert any("uncommitted" in row["title"] for row in entries), (
+            "fixture must demonstrate spilled uncommitted content"
+        )
+        assert info == {"approximate": True}
+        assert "可能包含未提交内容" in capsys.readouterr().err
+        markdown = history.render(
+            entries, dt.date(2026, 11, 12), "Asia/Shanghai", approximate=info["approximate"]
+        )
+        assert "可能包含未提交内容" in markdown
+    finally:
+        db.close()
+
+
+def test_safari_rejects_locked_database_even_with_approximate_opt_in(tmp_path, monkeypatch):
+    from minicpm_tools import history
+
+    path = tmp_path / "History.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE fixture(id INTEGER)")
+    db.execute("BEGIN EXCLUSIVE")
+    monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
+    try:
+        with pytest.raises(ToolError, match="被锁定.*一致快照"):
+            read_history(
+                path,
+                "safari",
+                dt.date(2026, 11, 12),
+                "Asia/Shanghai",
+                allow_approximate_snapshot=True,
+            )
+    finally:
+        db.close()
+
+
+def test_cli_approximate_output_is_labeled(tmp_path, monkeypatch, capsys):
+    from argparse import Namespace
+
+    from minicpm_tools import history
+
+    path = tmp_path / "History"
+    db = _journal_off_spilled_history(path, stale_journal=False)
+    monkeypatch.setattr(history, "BACKUP_LOCK_TIMEOUT", 0.15)
+    args = Namespace(
+        timezone="Asia/Shanghai",
+        date="2026-11-12",
+        database=str(path),
+        browser="chrome",
+        mode="list",
+        output_dir=str(tmp_path / "notes"),
+        allow_approximate_snapshot=True,
+    )
+    try:
+        history.run(args)
+        output = (tmp_path / "notes/2026-11-12-reading.md").read_text()
+        assert "可能包含未提交内容" in output
+        assert "可能包含未提交内容" in capsys.readouterr().err
+    finally:
+        db.close()

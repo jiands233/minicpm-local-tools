@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from itertools import pairwise
 from pathlib import Path
 from urllib.parse import quote
 
@@ -195,6 +196,87 @@ def register(components, selected, root=ROOT):
             )
 
 
+def same_file_bytes(expected, actual):
+    with expected.open("rb") as left, actual.open("rb") as right:
+        while True:
+            left_block = left.read(4 * 1024 * 1024)
+            right_block = right.read(4 * 1024 * 1024)
+            if left_block != right_block:
+                return False
+            if not left_block:
+                return True
+
+
+def is_appledouble_sidecar(path):
+    """Recognize a valid v2 AppleDouble companion, not arbitrary ._ filenames.
+
+    BSD tar on macOS can absorb these into xattrs instead of materializing them.
+    Python/Linux extraction retains them as files; neither form is a runtime
+    dependency. The corresponding entry must exist in the same staging directory.
+    """
+    if not path.name.startswith("._") or path.name[2:] in {"", ".", ".."}:
+        return False
+    if path.is_symlink() or not path.is_file():
+        return False
+    companion = path.with_name(path.name[2:])
+    if not companion.exists() and not companion.is_symlink():
+        return False
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        header = stream.read(26)
+        if len(header) != 26 or header[:8] != b"\x00\x05\x16\x07\x00\x02\x00\x00":
+            return False
+        count = int.from_bytes(header[24:26], "big")
+        table_end = 26 + count * 12
+        if table_end > size:
+            return False
+        identifiers = set()
+        spans = []
+        for _ in range(count):
+            entry = stream.read(12)
+            identifier = int.from_bytes(entry[:4], "big")
+            offset = int.from_bytes(entry[4:8], "big")
+            length = int.from_bytes(entry[8:12], "big")
+            if identifier in identifiers or offset < table_end or offset + length > size:
+                return False
+            identifiers.add(identifier)
+            if length:
+                spans.append((offset, offset + length))
+        spans.sort()
+        return all(left[1] <= right[0] for left, right in pairwise(spans))
+
+
+def verify_runtime_tree(staging, target, entries):
+    """Check every extracted member, without following installed symlinks."""
+    for expected in entries:
+        relative = expected.relative_to(staging)
+        actual = target / relative
+        mismatch = (
+            f"Existing runtime member differs from verified archive: {relative}; left untouched."
+        )
+        if not actual.exists() and not actual.is_symlink():
+            raise SetupError(
+                f"Incomplete runtime: missing {relative}; existing files left untouched."
+            )
+        if expected.is_symlink():
+            if not actual.is_symlink() or os.readlink(actual) != os.readlink(expected):
+                raise SetupError(mismatch)
+        elif actual.is_symlink():
+            raise SetupError(mismatch)
+        elif expected.is_dir():
+            if not actual.is_dir():
+                raise SetupError(mismatch)
+        elif expected.is_file():
+            if not actual.is_file() or not same_file_bytes(expected, actual):
+                raise SetupError(mismatch)
+            # A byte-identical executable that has lost execute permission is
+            # still unusable. Compare the owner bit, not umask-dependent group bits.
+            if bool(expected.stat().st_mode & 0o100) != bool(actual.stat().st_mode & 0o100):
+                raise SetupError(mismatch)
+        else:
+            raise SetupError(f"Unsupported runtime archive member: {relative}")
+
+
 def install_runtime(component, root=ROOT):
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise SetupError("This pinned runtime setup is verified for Apple Silicon macOS only.")
@@ -204,42 +286,45 @@ def install_runtime(component, root=ROOT):
             "Download/check the runtime archive first; installation never downloads implicitly."
         )
     target = root / ".local/runtime"
-    binary = target / "ollama"
-    if binary.is_file():
-        if binary.is_symlink():
-            raise SetupError("Existing runtime binary is a symlink; left untouched.")
-        # --version can report the running server, not this client binary.
-        with tarfile.open(archive) as tar:
-            member = tar.getmember("ollama")
-            if not member.isfile():
-                raise SetupError("Expected regular Ollama binary in verified archive.")
-            with tar.extractfile(member) as expected, binary.open("rb") as actual:
-                while True:
-                    expected_block = expected.read(4 * 1024 * 1024)
-                    actual_block = actual.read(4 * 1024 * 1024)
-                    if expected_block != actual_block:
-                        raise SetupError(
-                            "Existing Ollama binary differs from verified archive; left untouched."
-                        )
-                    if not expected_block:
-                        break
-        print(f"Ollama {component['version']} local binary matches verified archive.")
-        return
     with tempfile.TemporaryDirectory(prefix="mcpm-runtime-", dir=root / ".local") as temp:
         staging = Path(temp)
         with tarfile.open(archive) as tar:
-            # data filter rejects traversal, escaping links, special files and unsafe modes.
+            # Apply the same traversal/link validation to fresh installs and reuse.
             tar.extractall(staging, filter="data")
-        if not (staging / "ollama").is_file():
-            raise SetupError("Verified archive did not contain expected Ollama binary.")
-        items = list(staging.iterdir())
+        binary = staging / "ollama"
+        if binary.is_symlink() or not binary.is_file():
+            raise SetupError("Verified archive did not contain expected regular Ollama binary.")
+        # rglob does not descend into symlink directories; parents sort before children.
+        entries = [item for item in sorted(staging.rglob("*")) if not is_appledouble_sidecar(item)]
         if any(
-            (target / item.name).exists() or (target / item.name).is_symlink() for item in items
+            (target / item.relative_to(staging)).exists()
+            or (target / item.relative_to(staging)).is_symlink()
+            for item in entries
         ):
-            raise SetupError("Existing runtime files would be overwritten; left untouched.")
+            verify_runtime_tree(staging, target, entries)
+            print(f"Ollama {component['version']} complete local runtime matches verified archive.")
+            return
         target.mkdir(parents=True, exist_ok=True)
-        for item in items:
-            os.replace(item, target / item.name)
+        for item in entries:
+            destination_path = target / item.relative_to(staging)
+            try:
+                if item.is_symlink():
+                    os.symlink(os.readlink(item), destination_path)
+                elif item.is_dir():
+                    destination_path.mkdir(mode=item.stat().st_mode & 0o777)
+                elif item.is_file():
+                    # Exclusive link publication also preserves executable modes.
+                    # Never replace a file that appeared after the preflight check.
+                    os.link(item, destination_path)
+                else:
+                    raise SetupError(
+                        f"Unsupported runtime archive member: {item.relative_to(staging)}"
+                    )
+            except FileExistsError as exc:
+                raise SetupError(
+                    "Runtime destination appeared during installation; existing file left untouched. "
+                    "Installation is incomplete; inspect .local/runtime before retrying."
+                ) from exc
     print(f"Installed Ollama {component['version']} inside .local/runtime; no system installation.")
 
 

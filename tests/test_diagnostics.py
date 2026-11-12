@@ -61,3 +61,48 @@ def test_httpx_invalid_url_fails_cleanly(monkeypatch):
     with pytest.raises(ToolError) as exc:
         client._request(client.base_url, "/models")
     assert "private URL details" not in str(exc.value)
+
+
+def test_context_overflow_is_actionable_without_echoing_private_error(monkeypatch):
+    import httpx
+
+    client = LocalClient()
+    real_client = httpx.Client
+
+    def handler(request):
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "request (11013 tokens) exceeds the available context size (8192 tokens); private-input"
+                }
+            },
+        )
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    with pytest.raises(ToolError, match="输入超过模型上下文长度") as exc:
+        client.chat("private-input")
+    assert "private-input" not in str(exc.value)
+
+
+def test_unrelated_400_remains_generic(monkeypatch):
+    import httpx
+
+    client = LocalClient()
+    real_client = httpx.Client
+
+    def handler(request):
+        return httpx.Response(400, json={"error": {"message": "invalid model; private-input"}})
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    with pytest.raises(ToolError, match="本地模型请求失败") as exc:
+        client.chat("private-input")
+    assert "private-input" not in str(exc.value)

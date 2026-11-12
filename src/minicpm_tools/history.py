@@ -245,7 +245,15 @@ def _read_snapshot(target, browser, lower, upper, check_integrity=False):
     return rows
 
 
-def read_history(path: Path, browser: str, day: dt.date, timezone: str):
+def read_history(
+    path: Path,
+    browser: str,
+    day: dt.date,
+    timezone: str,
+    *,
+    allow_approximate_snapshot: bool = False,
+    snapshot_info: dict | None = None,
+):
     zone = ZoneInfo(timezone)
     start = dt.datetime.combine(day, dt.time(), zone).timestamp()
     end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), zone).timestamp()
@@ -286,9 +294,16 @@ def read_history(path: Path, browser: str, day: dt.date, timezone: str):
                         sleep=BACKUP_RETRY_INTERVAL,
                     )
                     rows = _read_snapshot(target, browser, lower, upper)
-            except _HistoryLocked:
-                if browser != "chrome":
-                    raise
+            except _HistoryLocked as exc:
+                if browser != "chrome" or not allow_approximate_snapshot:
+                    raise ToolError(
+                        "浏览器历史数据库被锁定，无法生成一致快照；请关闭浏览器后重试。"
+                        + (
+                            " 如接受未提交内容风险，可显式指定 --allow-approximate-snapshot。"
+                            if browser == "chrome"
+                            else ""
+                        )
+                    ) from exc
                 copy_path = Path(tmp) / "copy.sqlite"
                 identity, sidecar = _copy_stable_chrome(path, copy_path)
                 with closing(sqlite3.connect(copy_path.as_uri() + "?mode=ro", uri=True)) as target:
@@ -296,10 +311,12 @@ def read_history(path: Path, browser: str, day: dt.date, timezone: str):
                 if _identity(path.lstat()) != identity or _sidecar_state(path) != sidecar:
                     raise ToolError("Chrome 历史库在快照验证期间发生变化；请稍后重试。")
                 print(
-                    "注意：Chrome 历史已使用无锁近似快照，检查通过也不保证事务一致；"
-                    "需要严格一致性请关闭浏览器后重试。",
+                    "警告：已使用无锁近似快照，可能包含未提交内容；完整性检查不能保证事务一致。"
+                    "需要一致结果请关闭浏览器后重试。",
                     file=sys.stderr,
                 )
+                if snapshot_info is not None:
+                    snapshot_info["approximate"] = True
         except sqlite3.Error as exc:
             raise ToolError("历史数据库读取失败，请检查浏览器类型、访问权限和数据库结构。") from exc
     result = []
@@ -418,7 +435,7 @@ def summarize(entries, client):
     return groups
 
 
-def render(entries, day, zone, groups=None):
+def render(entries, day, zone, groups=None, *, approximate=False):
     lines = [
         f"# 阅读回顾 · {day}",
         "",
@@ -426,6 +443,11 @@ def render(entries, day, zone, groups=None):
         "仅保留已知站点的公开页面编号，其他 URL 查询参数和片段已隐藏；规则过滤不能保证消除所有敏感内容。",
         "",
     ]
+    if approximate:
+        lines += [
+            "> ⚠️ 此结果来自无锁近似快照，可能包含未提交内容；完整性检查不能保证事务一致。",
+            "",
+        ]
     if groups:
         lines += ["## 主题（模型归类，请核对）", ""]
         for label, ids in groups:
@@ -461,16 +483,21 @@ def run(args):
         if args.browser == "chrome"
         else "Library/Safari/History.db"
     )
+    snapshot_info = {}
     entries = read_history(
         Path(args.database).expanduser() if args.database else default,
         args.browser,
         day,
         args.timezone,
+        allow_approximate_snapshot=args.allow_approximate_snapshot,
+        snapshot_info=snapshot_info,
     )
     groups = (
         summarize(entries, LocalClient.from_env()) if args.mode == "summary" and entries else None
     )
-    result = render(entries, day, args.timezone, groups)
+    result = render(
+        entries, day, args.timezone, groups, approximate=snapshot_info.get("approximate", False)
+    )
     if args.output_dir:
         print(write_new(Path(args.output_dir) / f"{day}-reading.md", result))
     else:
@@ -485,4 +512,9 @@ def register(subparsers):
     parser.add_argument("--timezone", default="Asia/Shanghai")
     parser.add_argument("--mode", choices=["list", "summary"], default="list")
     parser.add_argument("--output-dir", help="保存目录；省略时只预览")
+    parser.add_argument(
+        "--allow-approximate-snapshot",
+        action="store_true",
+        help="仅 Chrome 锁定时允许无锁近似复制，可能包含未提交内容；默认拒绝",
+    )
     parser.set_defaults(func=run)

@@ -178,3 +178,34 @@ printf '已校验模型目录：%s\n' "$model_dir"
 ```
 
 若要运行 small，请使用表中固定版本及两个 SHA256 执行同样校验，并显式传入其本地路径。切换模型后请重新检查实际音频，不要把本节输出当作质量担保。项目仍保留较小的 tiny 演示配置；模型选择应按你的语言、准确性、运行时长和磁盘空间自行评估。
+
+### large-v3-turbo 对同一段真实人声的验证（2026-11-12）
+
+在同一 Apple Silicon 16 GB Mac、同一个 JFK 20 秒片段上，额外运行一次社区 MLX 转换的多语言 `whisper-large-v3-turbo`，命令仍使用 `--language en --no-summary`，**没有运行 MiniCPM 摘要**。权重约 1.50 GiB；对于此前对照的几个词，本次正确识别了 “solemn oath”、 “forebears”（与参考 “forbears” 为不同拼写）和 “mortal”。先前 tiny/base/small 在这些词上各有误识，详见上表。时间戳相对截取片段，末段止于约 19.96 秒。
+
+`/usr/bin/time -l` 测得本次命令墙钟时间约 3.09 秒、maximum resident set size 约 0.98 GiB、peak memory footprint 约 2.28 GiB。这是一次运行，包含模型加载与音频解码，机器可能同时有其他程序运行；指标不构成严格性能对比，也不能推出其他机器的内存需求。**单一英文历史演说片段结果不能证明中文、嘈杂音频、多人或真实会议质量**；转写和后续摘要仍需对照录音。项目保留 tiny 作为演示配置，不自动下载或切换更大的模型。
+
+这次权重来自 [mlx-community/whisper-large-v3-turbo 固定版本 a4aaeec](https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb)，不在本项目的固定安装清单内。`weights.safetensors` 字节数为 `1613977612`，SHA256 为 `951ed3fc1203e6a62467abb2144a96ce7eafca8fa77e3704fdb8635ff3e7f8a6`（与该固定版本的 Hugging Face LFS 元数据一致）；`config.json` SHA256 为 `b34fc29e4e11e0a25e812775dd67f4dd16fc2c8eb43d28ae25ff7d660ecb6379`，并与对应 Git blob SHA1 `6ac9a52a28f70a2e5681c250a470eca6e9c8cc3e` 核对。来源页面未明确列出该转换仓库的许可标识；使用前请核查原模型和转换权重各自条款，不因为本项目 MIT 许可证就推定其授权范围。
+
+如果自行复现，下例创建全新目录，先校验再用**你已准备好的**音频，不覆盖现有权重；下载约 1.61 GB：
+
+```sh
+(
+set -eu
+sample_audio="/absolute/path/to/jfk-commons-excerpt.wav"  # 改为上文生成的实际路径
+mkdir -p .local .local/validation/human-speech
+model_dir="$(mktemp -d "$PWD/.local/whisper-turbo.XXXXXXXX")"
+run_dir="$(mktemp -d "$PWD/.local/validation/human-speech/turbo.XXXXXXXX")"
+model_url="https://huggingface.co/mlx-community/whisper-large-v3-turbo/resolve/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+curl -fsSL "$model_url/config.json" -o "$model_dir/config.json"
+curl -fsSL "$model_url/weights.safetensors" -o "$model_dir/weights.safetensors"
+(cd "$model_dir" && printf '%s  %s\n' \
+  b34fc29e4e11e0a25e812775dd67f4dd16fc2c8eb43d28ae25ff7d660ecb6379 config.json \
+  951ed3fc1203e6a62467abb2144a96ce7eafca8fa77e3704fdb8635ff3e7f8a6 weights.safetensors | shasum -a 256 -c -)
+/usr/bin/time -l .venv/bin/mcpm audio "$sample_audio" \
+  --whisper-model "$model_dir" --language en --output-dir "$run_dir" --no-summary
+printf '模型目录：%s\n结果目录：%s\n' "$model_dir" "$run_dir"
+)
+```
+
+本机本次原始结果存于 `.local/validation/human-speech/turbo-eval.3tG0GedM/`，模型存于 `.local/whisper-turbo.fzKzRgya/`，都被 Git 忽略；检查完后可自行保留或清理。下载和校验失败时新建目录会保留供排查，脚本不会覆盖已有模型或录音。

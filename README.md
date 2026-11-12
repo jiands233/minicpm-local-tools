@@ -62,6 +62,8 @@ uv sync --extra dev --extra pdf --extra audio
 .venv/bin/mcpm shell run 'df -h'
 ```
 
+阅读回顾默认只接受一致的 SQLite 备份；浏览器独占锁定时需关闭浏览器，或明确选择带未提交数据风险的近似快照（见[说明](docs/history.md)）。
+
 输出目录由你指定，默认拒绝覆盖（音频每次新建子目录）。搜索重建需要 `--replace`。剪贴板只在推理成功且内容没有被其他应用改动时回写。命令执行要求交互终端输入 `EXECUTE`，没有自动确认参数。
 
 ## 验证与边界

@@ -86,6 +86,21 @@ class LocalClient:
                     if payload is None
                     else client.post(base + route, json=payload)
                 )
+                if response.status_code == 400:
+                    # Read the local error only for classification; never echo it,
+                    # since a compatible backend may include private prompt text.
+                    try:
+                        error = response.json().get("error")
+                        message = error.get("message", "") if isinstance(error, dict) else error
+                    except (ValueError, AttributeError):
+                        message = None
+                    if isinstance(message, str) and re.search(
+                        r"(?:exceed|too (?:many|long)|maximum|max).{0,120}(?:context|token)|"
+                        r"(?:context|token).{0,120}(?:exceed|too (?:many|long)|maximum|max)",
+                        message,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    ):
+                        raise ToolError("输入超过模型上下文长度；请缩短内容或分段后重试。")
                 response.raise_for_status()
                 return response.json()
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:

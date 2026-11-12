@@ -37,7 +37,7 @@
 .venv/bin/python -m minicpm_tools clipboard image-todos --apply
 ```
 
-`--text`、`--file`、`--stdin`、`--image` 互斥，且不能与 `--apply` 同用。默认 CLI 图片动作会读取剪贴板 PNG / TIFF；复制文件图标不等价于复制图片内容。文本最多 24,000 字符，桥接图片最多 20 MB。
+`--text`、`--file`、`--stdin`、`--image` 互斥，且不能与 `--apply` 同用。默认 CLI 图片动作会读取剪贴板 PNG / TIFF；复制文件图标不等价于复制图片内容。文本输入硬上限为 24,000 字符，桥接图片最多 20 MB；具体模型的上下文可能更小，遇上下文超限请缩短或分段。
 
 ## 模型与边界
 

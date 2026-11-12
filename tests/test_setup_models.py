@@ -164,3 +164,214 @@ def test_download_concurrent_destination_is_never_clobbered(tmp_path, monkeypatc
         setup.download_file(component, item, tmp_path)
     assert destination.read_bytes() == b"other process data"
     assert sorted(p.name for p in destination.parent.iterdir()) == [destination.name]
+
+
+def runtime_tree_component(root):
+    """Tiny archive with the file/link shapes present in a Darwin runtime."""
+    archive = root / ".local/runtime/ollama-darwin.tgz"
+    archive.parent.mkdir(parents=True)
+    with tarfile.open(archive, "w:gz") as tar:
+        directory = tarfile.TarInfo("lib")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        tar.addfile(directory)
+        empty = tarfile.TarInfo("lib/empty")
+        empty.type = tarfile.DIRTYPE
+        empty.mode = 0o755
+        tar.addfile(empty)
+        for name, content, mode in [
+            ("ollama", b"verified binary", 0o755),
+            ("lib/core.dylib", b"verified library", 0o644),
+        ]:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = mode
+            tar.addfile(info, io.BytesIO(content))
+        for name, link, kind in [
+            ("lib/alias.dylib", "core.dylib", tarfile.SYMTYPE),
+            ("lib/hard.dylib", "lib/core.dylib", tarfile.LNKTYPE),
+            ("lib-current", "lib", tarfile.SYMTYPE),
+        ]:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.linkname = link
+            tar.addfile(info)
+    item = fixture_item(archive.read_bytes())
+    item["destination"] = ".local/runtime/ollama-darwin.tgz"
+    return {"kind": "runtime", "version": "test", "files": [item]}
+
+
+def test_runtime_reuse_requires_all_files_and_preserves_missing_library_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    component = runtime_component(tmp_path, {"ollama": b"verified binary", "libsample": b"library"})
+    target = tmp_path / ".local/runtime"
+    binary = target / "ollama"
+    binary.write_bytes(b"verified binary")
+    binary.chmod(0o755)
+    with pytest.raises(setup.SetupError, match="Incomplete runtime: missing libsample"):
+        setup.install_runtime(component, tmp_path)
+    assert binary.read_bytes() == b"verified binary"
+    assert not (target / "libsample").exists()
+
+
+def test_runtime_directory_symlink_hardlink_reuse_and_extra_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    component = runtime_tree_component(tmp_path)
+    target = tmp_path / ".local/runtime"
+    extra = target / "user-notes.txt"
+    extra.write_text("keep this")
+    setup.install_runtime(component, tmp_path)
+    assert (target / "lib").is_dir() and not (target / "lib").is_symlink()
+    assert (target / "lib/empty").is_dir()
+    assert list((target / "lib/empty").iterdir()) == []
+    assert (target / "lib/alias.dylib").is_symlink()
+    assert setup.os.readlink(target / "lib/alias.dylib") == "core.dylib"
+    assert (target / "lib-current").is_symlink()
+    assert (target / "lib/hard.dylib").read_bytes() == b"verified library"
+    assert (target / "lib/core.dylib").stat().st_ino == (target / "lib/hard.dylib").stat().st_ino
+    setup.install_runtime(component, tmp_path)
+    assert extra.read_text() == "keep this"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing-library",
+        "modified-library",
+        "wrong-symlink",
+        "file-instead-of-dir",
+        "lost-executable-bit",
+        "missing-and-corrupt",
+        "missing-empty-dir",
+    ],
+)
+def test_runtime_reuse_rejects_incomplete_or_changed_tree(tmp_path, monkeypatch, damage):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    component = runtime_tree_component(tmp_path)
+    target = tmp_path / ".local/runtime"
+    setup.install_runtime(component, tmp_path)
+    if damage == "missing-and-corrupt":
+        (target / "lib/core.dylib").unlink()
+        (target / "ollama").write_bytes(b"changed binary")
+    elif damage == "missing-empty-dir":
+        (target / "lib/empty").rmdir()
+    elif damage == "missing-library":
+        (target / "lib/core.dylib").unlink()
+    elif damage == "modified-library":
+        (target / "lib/core.dylib").write_bytes(b"changed library")
+    elif damage == "wrong-symlink":
+        (target / "lib/alias.dylib").unlink()
+        (target / "lib/alias.dylib").symlink_to("hard.dylib")
+    elif damage == "file-instead-of-dir":
+        for path in (target / "lib").iterdir():
+            if path.is_dir() and not path.is_symlink():
+                path.rmdir()
+            else:
+                path.unlink()
+        (target / "lib").rmdir()
+        (target / "lib").write_bytes(b"not a directory")
+    else:
+        (target / "ollama").chmod(0o644)
+    with pytest.raises(setup.SetupError, match="Incomplete runtime|differs from verified archive"):
+        setup.install_runtime(component, tmp_path)
+    if damage == "missing-and-corrupt":
+        assert not (target / "lib/core.dylib").exists()
+        assert (target / "ollama").read_bytes() == b"changed binary"
+    elif damage == "missing-empty-dir":
+        assert not (target / "lib/empty").exists()
+    elif damage == "missing-library":
+        assert not (target / "lib/core.dylib").exists()
+    elif damage == "modified-library":
+        assert (target / "lib/core.dylib").read_bytes() == b"changed library"
+    elif damage == "wrong-symlink":
+        assert setup.os.readlink(target / "lib/alias.dylib") == "hard.dylib"
+    elif damage == "file-instead-of-dir":
+        assert (target / "lib").read_bytes() == b"not a directory"
+    else:
+        assert not ((target / "ollama").stat().st_mode & 0o100)
+
+
+def test_runtime_install_does_not_overwrite_concurrent_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    component = runtime_component(tmp_path, {"ollama": b"verified binary"})
+    target = tmp_path / ".local/runtime/ollama"
+    real_link = setup.os.link
+
+    def concurrent_link(source, destination):
+        if Path(destination) == target:
+            target.write_bytes(b"new user file")
+        return real_link(source, destination)
+
+    monkeypatch.setattr(setup.os, "link", concurrent_link)
+    with pytest.raises(setup.SetupError, match="appeared during installation"):
+        setup.install_runtime(component, tmp_path)
+    assert target.read_bytes() == b"new user file"
+
+
+def appledouble_fixture(payload=b"finder metadata"):
+    header = b"\x00\x05\x16\x07\x00\x02\x00\x00" + b"\0" * 16 + (1).to_bytes(2, "big")
+    entry = (9).to_bytes(4, "big") + (38).to_bytes(4, "big") + len(payload).to_bytes(4, "big")
+    return header + entry + payload
+
+
+def test_runtime_appledouble_companions_are_optional_on_all_hosts(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    component = runtime_component(
+        tmp_path,
+        {
+            "ollama": b"binary",
+            "metal/core.metallib": b"library",
+            "metal/._core.metallib": appledouble_fixture(),
+        },
+    )
+    target = tmp_path / ".local/runtime"
+    setup.install_runtime(component, tmp_path)
+    assert (target / "metal/core.metallib").read_bytes() == b"library"
+    # Pure-Python extraction on both macOS/Linux retains sidecars in staging;
+    # published runtime correctly excludes them, as BSD tar may do on macOS.
+    assert not (target / "metal/._core.metallib").exists()
+    setup.install_runtime(component, tmp_path)
+    sidecar = target / "metal/._core.metallib"
+    sidecar.write_bytes(b"user-owned extra file, do not overwrite")
+    setup.install_runtime(component, tmp_path)
+    assert sidecar.read_bytes() == b"user-owned extra file, do not overwrite"
+    assert list((tmp_path / ".local").glob("mcpm-runtime-*")) == []
+
+
+@pytest.mark.parametrize(
+    "sidecar_bytes, companion",
+    [
+        (b"ordinary runtime data", True),
+        (b"\x00\x05\x16\x07", True),
+        (appledouble_fixture()[:-1], True),
+        (appledouble_fixture(), False),
+    ],
+)
+def test_dot_underscore_files_are_not_blindly_excluded(
+    tmp_path, monkeypatch, sidecar_bytes, companion
+):
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup.platform, "machine", lambda: "arm64")
+    members = {"ollama": b"binary", "metal/._core.metallib": sidecar_bytes}
+    if companion:
+        members["metal/core.metallib"] = b"library"
+    else:
+        # A matching basename elsewhere is not a same-directory companion.
+        members["core.metallib"] = b"library"
+    component = runtime_component(tmp_path, members)
+    target = tmp_path / ".local/runtime"
+    setup.install_runtime(component, tmp_path)
+    sidecar = target / "metal/._core.metallib"
+    assert sidecar.read_bytes() == sidecar_bytes
+    sidecar.unlink()
+    with pytest.raises(setup.SetupError, match="Incomplete runtime: missing metal/._core.metallib"):
+        setup.install_runtime(component, tmp_path)
+    assert not sidecar.exists()
+    assert list((tmp_path / ".local").glob("mcpm-runtime-*")) == []
