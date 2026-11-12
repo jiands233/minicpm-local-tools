@@ -367,7 +367,9 @@ def render_notes(notes: dict, source_name: str) -> str:
         for item in notes[key]:
             reference = f"[{timestamp(item['start'])}–{timestamp(item['end'])}]"
             if key == "actions":
-                lines.append(f"- [ ] {_safe(item['text'])}（负责人：{_safe(item['owner'])}；截止：{_safe(item['due'])}）{reference}")
+                owner = item["owner"] if item["owner"] != "未提及" else "未识别（可能遗漏）"
+                due = item["due"] if item["due"] != "未提及" else "未识别（可能遗漏）"
+                lines.append(f"- [ ] {_safe(item['text'])}（负责人：{_safe(owner)}；截止：{_safe(due)}；模型判断，待核对）{reference}")
             else:
                 lines.append(f"- {_safe(item['text'])} {reference}")
                 if item["text"] != item["evidence"]:

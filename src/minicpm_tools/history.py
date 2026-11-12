@@ -14,7 +14,7 @@ import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from .client import LocalClient
@@ -346,8 +346,15 @@ def read_history(
     return result
 
 
+_UNSAFE_DISPLAY = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
 def escape(text):
-    return re.sub(r"([\\`*_{}\[\]<>])", r"\\\1", text).replace("\r", " ").replace("\n", " ")
+    # Browser page titles and model labels can contain terminal escape sequences
+    # or bidi controls. Keep their visible representation without interpreting it.
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = _UNSAFE_DISPLAY.sub(lambda match: ascii(match.group())[1:-1], text)
+    return re.sub(r"([\\`*_{}\[\]<>])", r"\\\1", text)
 
 
 def history_batches(entries):
@@ -457,7 +464,8 @@ def render(entries, day, zone, groups=None, *, approximate=False):
     if not entries:
         lines.append("当天没有符合筛选条件的访问记录。")
     for row in entries:
-        safe_link = row["url"].replace("(", "%28").replace(")", "%29").replace(" ", "%20")
+        safe_link = _UNSAFE_DISPLAY.sub(lambda match: quote(match.group(), safe=""), row["url"])
+        safe_link = safe_link.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
         redaction = " · 链接参数已隐藏，可能无法回到原页面" if row.get("link_redacted") else ""
         lines.append(
             f"- {row['id']}. {row['time']} [{escape(row['title'])}]({safe_link}) · {escape(row['domain'])} · {row['visits']} 次访问{redaction}"

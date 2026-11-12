@@ -95,10 +95,19 @@ def test_summary_chunks_grounding_and_render():
     assert notes['rejected'] == 3
     assert notes['overviews'] == ['准备报告。']
     rendered = render_notes(notes, '会议.wav')
-    assert '负责人：未提及' in rendered
+    assert '负责人：未识别（可能遗漏）' in rendered
+    assert '模型判断，待核对' in rendered
     assert '[00:00:00.000–00:00:01.000]' in rendered
     assert '没有说过的话' not in rendered
     assert '已丢弃 3 条' in rendered
+
+
+def test_render_marks_model_owner_and_deadline_as_unverified():
+    notes = {'overviews': [], 'key_points': [], 'questions': [], 'rejected': 0,
+             'actions': [{'text': '明天给小王发报告。', 'evidence': '明天给小王发报告。',
+                          'start': 0, 'end': 1, 'owner': '小王', 'due': '明天'}]}
+    rendered = render_notes(notes, 'demo.wav')
+    assert '负责人：小王；截止：明天；模型判断，待核对' in rendered
 
 
 def test_no_summary_preserves_timestamp_outputs_and_never_overwrites(tmp_path):

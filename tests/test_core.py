@@ -230,6 +230,29 @@ def test_history_redaction_does_not_merge_different_pages(tmp_path):
     assert "identity" not in records[0]
 
 
+def test_history_escapes_terminal_controls_in_title_url_and_model_label(tmp_path):
+    from minicpm_tools.history import render
+
+    path = tmp_path / "History"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            "CREATE TABLE urls(id INTEGER,title TEXT,url TEXT); "
+            "CREATE TABLE visits(url INTEGER,visit_time INTEGER);"
+        )
+        moment = int((dt.datetime(2026, 11, 12, 12, tzinfo=dt.UTC).timestamp() + 11644473600) * 1e6)
+        db.execute(
+            "INSERT INTO urls VALUES(1,?,?)",
+            ("Page\x1b]52;c;payload\x07\u202e", "https://example.com/\x1b[0m/\u202e"),
+        )
+        db.execute("INSERT INTO visits VALUES(1,?)", (moment,))
+    records = read_history(path, "chrome", dt.date(2026, 11, 12), "Asia/Shanghai")
+    report = render(records, "2026-11-12", "Asia/Shanghai", [("Topic\x1b[0m\u202e", [1])])
+    assert "\x1b" not in report and "\x07" not in report and "\u202e" not in report
+    assert r"\x1b" in report and r"\x07" in report and r"\u202e" in report
+    assert "%1B" in report and "%E2%80%AE" in report
+    assert "https://example.com/" in report
+
+
 def test_history_source_open_failure_is_actionable(tmp_path, monkeypatch):
     path = tmp_path / "History"
     path.touch()
