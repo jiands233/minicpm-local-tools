@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -47,6 +49,48 @@ def _terminal_json(value):
 
 def _file_identity(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _publish_new_index(temporary: Path, index: Path, progress: Callable[[str], None]) -> None:
+    """Publish without overwriting, including on volumes without hard links."""
+    try:
+        os.link(temporary, index)
+        return
+    except OSError as exc:
+        if exc.errno not in {errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EXDEV, errno.EINVAL}:
+            raise
+
+    # Some external volumes do not implement hard links. The destination is
+    # visible during copying, but exclusive creation still prevents clobbering.
+    progress("硬链接不可用；独占创建索引，写入期间请勿访问。")
+    fd = os.open(index, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    identity = None
+    owned_fd = True
+    try:
+        identity = os.fstat(fd)
+        output = os.fdopen(fd, "wb")
+        owned_fd = False  # fdopen owns and closes the descriptor from here on.
+        with output, temporary.open("rb") as source:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+    except BaseException:
+        if owned_fd:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if identity is None:
+            # Without an identity, deleting the path could remove a concurrent
+            # replacement. Preserve it and warn about a possible empty file.
+            print("无法确认索引文件身份，目标路径可能残留空文件；请检查。", file=sys.stderr)
+        else:
+            try:
+                current = index.lstat()
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    index.unlink()
+            except OSError:
+                # A cleanup failure must not hide the original exception.
+                pass
+        raise
 
 
 def _existing_index_identity(index: Path, root: Path):
@@ -442,9 +486,9 @@ def index_folder(
                 raise ToolError("原索引在重建过程中发生变化，拒绝覆盖。")
             os.replace(temporary, index)
         else:
-            # Atomic publish without clobbering a concurrently created index.
-            os.link(temporary, index)
-            temporary.unlink()
+            # Prefer atomic publication; fall back to exclusive creation on
+            # volumes that do not support hard links, never clobbering a target.
+            _publish_new_index(temporary, index, progress)
         return metadata
     except Exception as exc:
         if isinstance(exc, ToolError):

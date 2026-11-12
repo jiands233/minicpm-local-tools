@@ -184,3 +184,32 @@ def test_unrelated_400_remains_generic(monkeypatch):
     with pytest.raises(ToolError, match="本地模型请求失败") as exc:
         client.chat("private-input")
     assert "private-input" not in str(exc.value)
+
+
+@pytest.mark.parametrize("message", [
+    "max_tokens must be <= 1024; private-input",
+    "maximum output tokens is 1024; private-input",
+])
+def test_output_token_parameter_error_is_not_misdiagnosed_as_long_input(monkeypatch, message):
+    import httpx
+
+    client = LocalClient()
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(400, json={"error": {"message": message}})),
+            **kwargs,
+        ),
+    )
+    with pytest.raises(ToolError, match="本地模型请求失败") as exc:
+        client.chat("hi")
+    assert "private-input" not in str(exc.value)
+
+
+def test_input_token_overflow_without_context_word_is_actionable():
+    from minicpm_tools.client import _context_overflow
+
+    assert _context_overflow("input tokens exceed the maximum of 8192")
+    assert _context_overflow("The maximum context length is 8192 tokens")

@@ -38,6 +38,22 @@ def local_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def _context_overflow(message: str) -> bool:
+    """Recognize input/context overflow, not an invalid output max_tokens option."""
+    limit = r"exceed|too (?:many|long)|maximum|max"
+    context = r"(?<![a-z])context(?![a-z])"
+    if re.search(rf"(?:{limit}).{{0,120}}{context}|{context}.{{0,120}}(?:{limit})", message,
+                 flags=re.IGNORECASE | re.DOTALL):
+        return True
+    # Some compatible servers describe the input token limit without saying
+    # "context". Require both an input-specific subject and an overflow verb.
+    return bool(
+        re.search(r"\b(?:input|prompt)\b", message, flags=re.IGNORECASE)
+        and re.search(r"\btokens?\b", message, flags=re.IGNORECASE)
+        and re.search(r"\b(?:exceed\w*|too many|too long)\b", message, flags=re.IGNORECASE)
+    )
+
+
 class LocalClient:
     def __init__(
         self,
@@ -99,12 +115,7 @@ class LocalClient:
                         message = error.get("message", "") if isinstance(error, dict) else error
                     except (ValueError, AttributeError):
                         message = None
-                    if isinstance(message, str) and re.search(
-                        r"(?:exceed|too (?:many|long)|maximum|max).{0,120}(?:context|token)|"
-                        r"(?:context|token).{0,120}(?:exceed|too (?:many|long)|maximum|max)",
-                        message,
-                        flags=re.IGNORECASE | re.DOTALL,
-                    ):
+                    if isinstance(message, str) and _context_overflow(message):
                         raise ToolError("输入超过模型上下文长度；请缩短内容或分段后重试。")
                 response.raise_for_status()
                 return response.json()

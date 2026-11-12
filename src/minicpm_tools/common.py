@@ -16,8 +16,28 @@ def write_new(path: Path, text: str) -> Path:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
         raise ToolError(f"文件已存在，拒绝覆盖：{path}") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(text)
+    identity = None
+    try:
+        identity = os.fstat(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = None  # The stream now owns the descriptor.
+            stream.write(text)
+    except BaseException:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        # A different process may have replaced the path during the write.
+        # Never remove anything except the file we created.
+        if identity is not None:
+            try:
+                current = path.lstat()
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    path.unlink()
+            except OSError:
+                pass
+        raise
     return path
 
 

@@ -487,8 +487,11 @@ def _publish_summary(run: Path, text: str) -> None:
     """Publish without overwriting; clean up our partial file on interruption."""
     fd, temp_name = tempfile.mkstemp(prefix=".summary-", dir=run)
     temp = Path(temp_name)
+    temp_fd = fd
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream = os.fdopen(temp_fd, "w", encoding="utf-8")
+        temp_fd = None  # stream now owns the descriptor
+        with stream:
             stream.write(text)
         destination = run / "summary.md"
         try:
@@ -499,20 +502,44 @@ def _publish_summary(run: Path, text: str) -> None:
             if exc.errno not in {errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EXDEV, errno.EINVAL}:
                 raise
             out_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            identity = os.fstat(out_fd)
+            # Track descriptor ownership even if fstat or fdopen itself fails.
+            # Without an inode identity we cannot safely unlink a pathname that
+            # another process might already have replaced.
+            identity = None
             try:
-                with os.fdopen(out_fd, "w", encoding="utf-8") as stream:
+                identity = os.fstat(out_fd)
+                stream = os.fdopen(out_fd, "w", encoding="utf-8")
+                out_fd = None  # stream now owns the descriptor
+                with stream:
                     stream.write(text)
             except BaseException:
+                if out_fd is not None:
+                    try:
+                        os.close(out_fd)
+                    except OSError:
+                        pass
+                if identity is None:
+                    print("无法核验新建纪要文件，可能留有空的 summary.md；请检查输出目录。", file=sys.stderr)
+                    raise
                 try:
                     current = destination.lstat()
                     if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
                         destination.unlink()
                 except FileNotFoundError:
                     pass
+                except OSError:
+                    print("无法清理未完成的 summary.md；请检查输出目录。", file=sys.stderr)
                 raise
     finally:
-        temp.unlink(missing_ok=True)
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            print("无法清理纪要临时文件；请检查输出目录。", file=sys.stderr)
 
 
 def handle(args) -> int:

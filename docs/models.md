@@ -39,6 +39,8 @@ bash script/serve_models.sh
 
 诊断分别校验文本、OCR 和 embedding 配置；单个地址无效时仍检查其他有效服务。未单独设置 OCR 或 embedding 地址时，它们继承文本地址；共享超时设置无效则三项都会提示。任一项失败或模型名称未匹配时，命令以非零状态退出。
 
+对于模型请求 HTTP 400，工具尝试识别上下文或输入 token 溢出并提示缩短输入；像 `max_tokens must be <= 1024` 这样仅拒绝输出参数的错误会报告通用请求失败，不会误称输入过长。兼容服务的错误格式各异，分类仍是启发式；不论分类结果如何，服务错误正文都不会回显到终端。
+
 注册时生成的 Modelfile 位于独立私有临时目录，命令结束后删除；不会覆盖 `.local/modelfiles/` 中已有文件或跟随同名符号链接。注册本身仍会创建或更新目标 Ollama 服务上的指定模型名称。
 
 Whisper 不注册到 Ollama，运行音频命令时传 `--whisper-model .local/whisper-tiny`，完整命令见 [audio.md](audio.md)。tiny 是便于验证流水线的小模型，不能据此推断长中文课程录音的转写质量。

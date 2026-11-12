@@ -522,6 +522,178 @@ def test_summary_fallback_removes_its_partial_file_on_failure(tmp_path, monkeypa
     assert not list(tmp_path.glob('.summary-*'))
 
 
+@pytest.mark.parametrize('failure', [KeyboardInterrupt, OSError])
+def test_summary_fallback_closes_fd_if_identity_cannot_be_checked(tmp_path, monkeypatch, capsys, failure):
+    import errno
+
+    from minicpm_tools import audio
+
+    real_open, real_fstat = audio.os.open, audio.os.fstat
+    opened = []
+
+    def track_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == tmp_path / 'summary.md':
+            opened.append(fd)
+        return fd
+
+    def failed_fstat(fd):
+        if opened and fd == opened[0]:
+            raise failure('fstat failed')
+        return real_fstat(fd)
+
+    monkeypatch.setattr(audio.os, 'link', lambda *args: (_ for _ in ()).throw(OSError(errno.EOPNOTSUPP, 'unsupported')))
+    monkeypatch.setattr(audio.os, 'open', track_open)
+    monkeypatch.setattr(audio.os, 'fstat', failed_fstat)
+    with pytest.raises(failure):
+        audio._publish_summary(tmp_path, '正文')
+    assert len(opened) == 1
+    with pytest.raises(OSError) as error:
+        real_fstat(opened[0])
+    assert error.value.errno == errno.EBADF
+    assert (tmp_path / 'summary.md').read_bytes() == b''
+    assert '可能留有空的 summary.md' in capsys.readouterr().err
+    assert not list(tmp_path.glob('.summary-*'))
+
+
+def test_summary_fallback_preserves_replacement_if_identity_check_fails(tmp_path, monkeypatch):
+    import errno
+
+    from minicpm_tools import audio
+
+    real_open, real_fstat = audio.os.open, audio.os.fstat
+    destination = tmp_path / 'summary.md'
+    opened = []
+
+    def track_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == destination:
+            opened.append(fd)
+        return fd
+
+    def replaced_before_fstat(fd):
+        if opened and fd == opened[0]:
+            destination.unlink()
+            destination.write_text('用户的新内容', encoding='utf-8')
+            raise OSError('fstat failed')
+        return real_fstat(fd)
+
+    monkeypatch.setattr(audio.os, 'link', lambda *args: (_ for _ in ()).throw(OSError(errno.EOPNOTSUPP, 'unsupported')))
+    monkeypatch.setattr(audio.os, 'open', track_open)
+    monkeypatch.setattr(audio.os, 'fstat', replaced_before_fstat)
+    with pytest.raises(OSError, match='fstat failed'):
+        audio._publish_summary(tmp_path, '正文')
+    assert destination.read_text(encoding='utf-8') == '用户的新内容'
+    with pytest.raises(OSError) as error:
+        real_fstat(opened[0])
+    assert error.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize('failure', [KeyboardInterrupt, OSError])
+def test_summary_fallback_closes_fd_and_removes_file_if_fdopen_fails(tmp_path, monkeypatch, failure):
+    import errno
+
+    from minicpm_tools import audio
+
+    real_fdopen, real_fstat = audio.os.fdopen, audio.os.fstat
+    calls, failed = 0, []
+
+    def fail_second(fd, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            failed.append(fd)
+            raise failure('fdopen failed')
+        return real_fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(audio.os, 'link', lambda *args: (_ for _ in ()).throw(OSError(errno.EOPNOTSUPP, 'unsupported')))
+    monkeypatch.setattr(audio.os, 'fdopen', fail_second)
+    with pytest.raises(failure, match='fdopen failed'):
+        audio._publish_summary(tmp_path, '正文')
+    with pytest.raises(OSError) as error:
+        real_fstat(failed[0])
+    assert error.value.errno == errno.EBADF
+    assert not (tmp_path / 'summary.md').exists()
+    assert not list(tmp_path.glob('.summary-*'))
+
+
+@pytest.mark.parametrize('failure', [KeyboardInterrupt, OSError])
+def test_summary_temp_fd_is_closed_if_fdopen_fails(tmp_path, monkeypatch, failure):
+    import errno
+
+    from minicpm_tools import audio
+
+    real_fstat = audio.os.fstat
+    failed = []
+    def failed_fdopen(fd, *args, **kwargs):
+        failed.append(fd)
+        raise failure('fdopen failed')
+
+    monkeypatch.setattr(audio.os, 'fdopen', failed_fdopen)
+    with pytest.raises(failure, match='fdopen failed'):
+        audio._publish_summary(tmp_path, '正文')
+    with pytest.raises(OSError) as error:
+        real_fstat(failed[0])
+    assert error.value.errno == errno.EBADF
+    assert not (tmp_path / 'summary.md').exists()
+    assert not list(tmp_path.glob('.summary-*'))
+
+
+def test_summary_fallback_preserves_replaced_file_when_write_fails(tmp_path, monkeypatch):
+    import errno
+
+    from minicpm_tools import audio
+
+    destination = tmp_path / 'summary.md'
+    real_fdopen = audio.os.fdopen
+
+    class ReplacingWriter:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+        def write(self, value):
+            destination.unlink()
+            destination.write_text('用户的新内容', encoding='utf-8')
+            raise OSError('interrupted write')
+
+    calls = 0
+    def fdopen(fd, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        stream = real_fdopen(fd, *args, **kwargs)
+        return ReplacingWriter(stream) if calls == 2 else stream
+
+    monkeypatch.setattr(audio.os, 'link', lambda *args: (_ for _ in ()).throw(OSError(errno.EOPNOTSUPP, 'unsupported')))
+    monkeypatch.setattr(audio.os, 'fdopen', fdopen)
+    with pytest.raises(OSError, match='interrupted write'):
+        audio._publish_summary(tmp_path, '正文')
+    assert destination.read_text(encoding='utf-8') == '用户的新内容'
+    assert not list(tmp_path.glob('.summary-*'))
+
+
+def test_summary_cleanup_failure_does_not_mask_interrupt(tmp_path, monkeypatch, capsys):
+    from minicpm_tools import audio
+
+    real_unlink = Path.unlink
+    def failed_unlink(path, *args, **kwargs):
+        if path.name.startswith('.summary-'):
+            raise PermissionError('filesystem unavailable')
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(audio.os, 'link', lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(Path, 'unlink', failed_unlink)
+    with pytest.raises(KeyboardInterrupt):
+        audio._publish_summary(tmp_path, '正文')
+    assert '无法清理纪要临时文件' in capsys.readouterr().err
+    assert not (tmp_path / 'summary.md').exists()
+    orphan, = tmp_path.glob('.summary-*')
+    real_unlink(orphan)
+
+
 def test_interrupted_summary_cli_keeps_exit_code_130(tmp_path, monkeypatch, capsys):
     from minicpm_tools import audio, cli
 

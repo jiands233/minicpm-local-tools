@@ -573,6 +573,188 @@ def test_replace_new_path_wont_clobber_file_created_during_build(corpus):
     assert index.read_text() == "concurrent file"
 
 
+def test_new_index_on_volume_without_hardlinks(corpus, monkeypatch):
+    import errno
+
+    from minicpm_tools import search
+
+    root, index = corpus
+    messages = []
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+    monkeypatch.setattr(search.os, "link", unsupported)
+    result = index_folder(root, index, mode="keyword", ocr=False, progress=messages.append)
+    assert result["files"] == 2
+    assert any("独占创建" in message for message in messages)
+    assert search_index(index, "biology", mode="keyword")[0].path.endswith("marine.md")
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_new_index_fallback_never_overwrites_concurrent_target(corpus, monkeypatch):
+    import errno
+
+    from minicpm_tools import search
+
+    root, index = corpus
+    def unsupported_after_target_appears(*args):
+        index.write_bytes(b"another process")
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+    monkeypatch.setattr(search.os, "link", unsupported_after_target_appears)
+    with pytest.raises(FileExistsError):
+        index_folder(root, index, mode="keyword", ocr=False)
+    assert index.read_bytes() == b"another process"
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+@pytest.mark.parametrize("replace_path", [False, True])
+def test_new_index_fallback_interrupt_cleans_only_own_file(corpus, monkeypatch, replace_path):
+    import errno
+
+    from minicpm_tools import search
+
+    root, index = corpus
+    displaced = index.parent / "displaced-partial"
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+    def interrupted(source, output, length):
+        output.write(source.read(64))
+        output.flush()
+        if replace_path:
+            index.rename(displaced)
+            index.write_bytes(b"replacement from another process")
+        raise KeyboardInterrupt
+    monkeypatch.setattr(search.os, "link", unsupported)
+    monkeypatch.setattr(search.shutil, "copyfileobj", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        index_folder(root, index, mode="keyword", ocr=False)
+    if replace_path:
+        assert index.read_bytes() == b"replacement from another process"
+        assert displaced.exists()
+    else:
+        assert not index.exists()
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_new_index_other_link_errors_do_not_trigger_fallback(corpus, monkeypatch):
+    import errno
+
+    from minicpm_tools import search
+
+    root, index = corpus
+    def io_error(*args):
+        raise OSError(errno.EIO, "disk I/O failure")
+    monkeypatch.setattr(search.os, "link", io_error)
+    with pytest.raises(ToolError, match="索引失败"):
+        index_folder(root, index, mode="keyword", ocr=False)
+    assert not index.exists()
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_new_index_fallback_disk_failure_removes_partial(corpus, monkeypatch):
+    import errno
+
+    from minicpm_tools import search
+
+    root, index = corpus
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+    def disk_full(source, output, length):
+        output.write(source.read(64))
+        output.flush()
+        raise OSError(errno.ENOSPC, "disk full")
+    monkeypatch.setattr(search.os, "link", unsupported)
+    monkeypatch.setattr(search.shutil, "copyfileobj", disk_full)
+    with pytest.raises(ToolError, match="索引失败"):
+        index_folder(root, index, mode="keyword", ocr=False)
+    assert not index.exists()
+    assert not list(index.parent.glob(".index.sqlite.*"))
+
+
+def test_new_index_fallback_unknown_identity_closes_fd_and_preserves_path(tmp_path, monkeypatch, capsys):
+    import errno
+
+    from minicpm_tools import search
+
+    temporary, index = tmp_path / "temp.sqlite", tmp_path / "target.sqlite"
+    temporary.write_bytes(b"completed index")
+    real_open, real_fstat = search.os.open, search.os.fstat
+    opened = []
+    def tracked_open(*args):
+        fd = real_open(*args)
+        opened.append(fd)
+        return fd
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "unsupported")
+    def identity_failure(fd):
+        if opened and fd == opened[0]:
+            raise OSError(errno.EIO, "fstat failed")
+        return real_fstat(fd)
+    with monkeypatch.context() as scope:
+        scope.setattr(search.os, "open", tracked_open)
+        scope.setattr(search.os, "link", unsupported)
+        scope.setattr(search.os, "fstat", identity_failure)
+        with pytest.raises(OSError, match="fstat failed"):
+            search._publish_new_index(temporary, index, lambda _: None)
+        with pytest.raises(OSError) as error:
+            real_fstat(opened[0])
+        assert error.value.errno == errno.EBADF
+    assert index.exists()  # Identity is unknown: do not delete a possible replacement.
+    assert "可能残留空文件" in capsys.readouterr().err
+
+
+def test_new_index_fallback_fdopen_failure_closes_fd_and_cleans_owned_path(tmp_path, monkeypatch):
+    import errno
+
+    from minicpm_tools import search
+
+    temporary, index = tmp_path / "temp.sqlite", tmp_path / "target.sqlite"
+    temporary.write_bytes(b"completed index")
+    real_open, real_fstat = search.os.open, search.os.fstat
+    opened = []
+    def tracked_open(*args):
+        fd = real_open(*args)
+        opened.append(fd)
+        return fd
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "unsupported")
+    def failed_fdopen(*args):
+        raise OSError(errno.EIO, "fdopen failed")
+    with monkeypatch.context() as scope:
+        scope.setattr(search.os, "open", tracked_open)
+        scope.setattr(search.os, "link", unsupported)
+        scope.setattr(search.os, "fdopen", failed_fdopen)
+        with pytest.raises(OSError, match="fdopen failed"):
+            search._publish_new_index(temporary, index, lambda _: None)
+        with pytest.raises(OSError) as error:
+            real_fstat(opened[0])
+        assert error.value.errno == errno.EBADF
+    assert not index.exists()
+
+
+def test_new_index_fallback_cleanup_error_does_not_hide_original(tmp_path, monkeypatch):
+    import errno
+
+    from minicpm_tools import search
+
+    temporary, index = tmp_path / "temp.sqlite", tmp_path / "target.sqlite"
+    temporary.write_bytes(b"completed index")
+    real_lstat = Path.lstat
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, "unsupported")
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+    def cleanup_denied(path, *args, **kwargs):
+        if path == index:
+            raise PermissionError("cleanup denied")
+        return real_lstat(path, *args, **kwargs)
+    monkeypatch.setattr(search.os, "link", unsupported)
+    monkeypatch.setattr(search.shutil, "copyfileobj", interrupted)
+    monkeypatch.setattr(Path, "lstat", cleanup_denied)
+    with pytest.raises(KeyboardInterrupt):
+        search._publish_new_index(temporary, index, lambda _: None)
+    assert index.exists()
+
+
 def test_unreadable_subdirectory_aborts_rebuild_and_preserves_previous_index(corpus):
     root, index = corpus
     client = FakeClient()
