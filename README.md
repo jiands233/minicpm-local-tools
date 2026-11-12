@@ -2,6 +2,8 @@
 
 在 macOS 上运行的五个本地 AI 小工具，共用本地模型服务。当前是 v0.1 开发中的 MVP，不是五个独立安装包。数据默认留在本机；模型下载需要网络，推理不需要云账号。
 
+五个入口均已实现并可运行，适合本地体验和继续开发。输出仍需人工核对：一次约 10 分 44 秒的公开多人情景会议测试生成了 75 条待办，包含大量误报并遗漏分工，音频纪要暂不适合作为无需核对的会议记录。
+
 | 工具 | 入口 | 能力 |
 |---|---|---|
 | 剪贴板 | 菜单栏 + `mcpm clipboard` | 翻译、精简、待办，中英文图片 OCR，快捷键 |
@@ -14,7 +16,14 @@
 
 ## 安装
 
-Apple Silicon，Python 3.11+，`uv`。原生菜单栏还需要 Xcode Command Line Tools。
+要求 Apple Silicon macOS、Python 3.11+、`uv` 和 `curl`。原生菜单栏还需要 Xcode Command Line Tools。尚未下载项目时，先克隆仓库：
+
+```sh
+git clone https://github.com/jiands233/minicpm-local-tools.git
+cd minicpm-local-tools
+```
+
+在项目根目录安装 Python 依赖：
 
 ```sh
 uv sync --extra dev --extra pdf --extra audio
@@ -23,18 +32,42 @@ uv sync --extra dev --extra pdf --extra audio
 
 命令示例统一使用项目 `.venv`，避免 `uv run` 未带 extra 时移除已经安装的可选依赖。文本与浏览历史模式只需基础依赖；PDF 需要 `pdf`，音频需要 `audio`。
 
-## 本地模型
-
-默认地址是 `http://127.0.0.1:11434/v1`。本机已下载的独立 Ollama 位于忽略 Git 的 `.local/runtime/ollama`；模型和测试数据也在 `.local/`，不提交到仓库。
+首次下载模型之前，可用示例文件验证不调用模型的关键词搜索：
 
 ```sh
-# 在独立终端启动；当前会话已经启动时无需重复运行
+.venv/bin/mcpm search index examples/search-corpus --index .local/offline-demo.sqlite --mode keyword --no-ocr
+.venv/bin/mcpm search query '鲸' --index .local/offline-demo.sqlite --mode keyword
+```
+
+索引默认拒绝覆盖；如果该路径已存在，查询它或选择一个新路径。
+
+## 本地模型
+
+新克隆的仓库没有运行时和模型，需要先手动下载并校验。推荐模型约 3.79 GB，运行时约 186 MB，注册和运行还需要额外磁盘空间。模型及运行时保存在被 Git 忽略的 `.local/`：
+
+```sh
+.venv/bin/python script/setup_models.py download runtime
+.venv/bin/python script/setup_models.py install-runtime
+.venv/bin/python script/setup_models.py download text-2b ocr embedding whisper-tiny
+.venv/bin/python script/setup_models.py check text-2b ocr embedding whisper-tiny runtime
+```
+
+默认地址是 `http://127.0.0.1:11434/v1`。如果 11434 已有 Ollama 服务，先确认该服务及模型存储的归属：注册会在目标服务创建或更新上述模型名称，客户端环境变量不能更改已运行服务的存储目录。
+
+在一个终端启动服务并保持运行：
+
+```sh
 ./script/serve_models.sh
-# 检查已注册模型
+```
+
+在另一个终端进入项目目录，注册文本、OCR 和 embedding 模型并检查：
+
+```sh
+.venv/bin/python script/setup_models.py register text-2b ocr embedding
 .venv/bin/mcpm doctor
 ```
 
-首次安装参考 [模型配置](docs/models.md)。允许分别配置文本、OCR、embedding 服务，但地址只接受 loopback。本工具禁用 HTTP 环境代理和跳转，不做远程回退。自定义的本地服务也应关闭云转发；项目启动脚本设置 `OLLAMA_NO_CLOUD=1`。
+[模型配置](docs/models.md)说明固定版本、磁盘空间和安装失败处理。允许分别配置文本、OCR、embedding 服务，但地址只接受 loopback。本工具禁用 HTTP 环境代理和跳转，不做远程回退。自定义的本地服务也应关闭云转发；项目启动脚本设置 `OLLAMA_NO_CLOUD=1`。
 
 ## 五个入口
 
@@ -51,6 +84,8 @@ uv sync --extra dev --extra pdf --extra audio
 
 # 3. 本地录音 -> 转写 + 纪要（需已下载 Whisper 权重）
 .venv/bin/mcpm audio /path/to/recording.m4a --whisper-model .local/whisper-tiny --output-dir outputs/audio
+# 只需要转写时，不调用摘要模型
+.venv/bin/mcpm audio /path/to/recording.m4a --whisper-model .local/whisper-tiny --no-summary --output-dir outputs/audio
 # 较长音频可选分段转写；切分边界可能截断语句
 .venv/bin/mcpm audio /path/to/recording.m4a --whisper-model .local/whisper-tiny --audio-chunk-seconds 300 --output-dir outputs/audio
 # 可再加 --audio-silence-cut 尝试在附近低能量处切分，效果仍需核对
@@ -71,20 +106,24 @@ uv sync --extra dev --extra pdf --extra audio
 
 输出目录由你指定，默认拒绝覆盖（音频每次新建子目录）。搜索重建需要 `--replace`。剪贴板只在推理成功且内容没有被其他应用改动时回写。命令执行要求交互终端输入 `EXECUTE`，没有自动确认参数。
 
+示例使用的 Whisper tiny 适合体验流程，但中文人名、地点和长录音可能识别错误。其他本地 Whisper 权重的使用与测试限制见[音频说明](docs/audio.md)。
+
 普通输出写入失败或被中断时会尽力清理本次创建的不完整文件；清理前会检查文件身份，但检查与删除之间仍有极小竞态。强制结束进程、系统崩溃或无法确认文件身份时，半成品仍可能残留，请检查后处理。
 
 ## 验证与边界
 
 ```sh
 .venv/bin/pytest -q
-.venv/bin/ruff check src tests
+.venv/bin/ruff check src tests script
 ./script/build_and_run.sh --build-only
 macos/.build/release/MiniCPMClipboard --self-test
 ```
 
-GitHub Actions 在 Ubuntu 和 macOS 的 Python 3.11/3.12 环境运行 Ruff 与单元测试，macOS 额外构建 Swift 应用；CI 不下载模型，也不测试 GUI 或真实推理。
+GitHub Actions 在 Ubuntu 和 macOS 的 Python 3.11/3.12 环境运行 Ruff 与单元测试，macOS 的 Python 3.12 任务额外构建 Swift 应用；CI 不下载模型，也不测试 GUI 或真实推理。
 
 单元测试使用 fake 模型验证失败处理和数据边界；自动化真实模型回归使用合成样本，另对公开人声样本做过有限验证。Chrome 只读验证曾读取真实历史，但未输出或保存页面详情、也未发送给模型；验证记录详见文档。小模型仍可能漏项、误译或生成错误解释，输出需核对；有引用也不等于语义已经正确。
+
+仍待验收的场景包括真实物理快捷键、系统图片剪贴板完整链路、Safari 历史访问授权，以及整机物理断网下的运行。公开多人情景会议已做过一次测试，但音频待办质量尚未通过；详细结果见[音频说明](docs/audio.md)。
 
 OCR 只面向中英文整页/单图纯文本，不含 PP-DocLayoutV3 完整表格/公式版面恢复；搜索不是全盘搜索；音频没有系统音频录制与说话人分离；历史不抓网页正文；命令助手不是自动执行 Agent。
 
