@@ -6,6 +6,22 @@ from minicpm_tools import cli, history, receipt
 from minicpm_tools.common import ToolError
 
 
+def test_receipt_style_is_local_and_rows_keep_fields():
+    entries, day, zone, groups = history.demo_data()
+    html = receipt.render_receipt(entries, day, zone, groups, demo=True)
+    style = html.split('<style>', 1)[1].split('</style>', 1)[0]
+    footer = html.split('<footer>', 1)[1]
+    assert '<link ' not in html
+    assert 'url(' not in style and 'http://' not in style and 'https://' not in style
+    assert 'text-overflow: ellipsis' in style
+    assert html.count('class="total-row"') == 2
+    assert 'class="barcode"' in footer and 'example.org' not in footer
+    assert 'example.org · 00:30' in html and '2 次访问' in html
+    assert 'title="Python 文件读取教程"' in html
+    share = receipt.render_receipt(entries, day, zone, groups, share=True)
+    assert 'class="barcode"' in share and 'example.org' not in share
+
+
 def test_demo_receipt_counts_links_and_disclosure():
     entries, day, zone, groups = history.demo_data()
     html = receipt.render_receipt(entries, day, zone, groups, demo=True)
