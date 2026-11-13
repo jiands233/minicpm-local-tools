@@ -1,5 +1,18 @@
 # MVP 与演化记录
 
+## 当前里程碑状态（2026-11-13）
+
+当前主线已收敛为本地阅读日报，以下历史轮次保留原记录，旧文中的“尚未运行 CI／未推送”不代表现在状态。
+
+| 里程碑 | 最新状态 |
+|---|---|
+| M0 定位与依赖 | 已随 `1ef3081` 推送；该提交远端 CI 成功 |
+| M1 验证 | 标题兜底、合成 history 与思考参数对照完成；用户仅反馈 Chrome list 正常。真实 summary、Safari、整机断网仍未验证，M1 未完成 |
+| M2 演示 | 零模型 demo 与两种 HTML 小票已实现；视频与主视觉等前端样式稳定后制作，M2 未完成 |
+| M3 投稿 | 已准备 [投稿草稿](submission.md) 和官方规则核对；仍缺真实验收、最终素材及表单确认，未提交、未发布 |
+
+用户待办见 [真机验收清单](reading-acceptance.md)。2026-11-12 的根目录方向交接文档以 `737e5b9` 为基线；本表与下方追加记录反映其后的进度。
+
 目标：当前目录纳入 Git，完成五个本地 MVP，并在实测中持续改进。原始调研保存在根目录，不修改研究历史。
 
 ## 2026-11-12 · 第一轮实现
@@ -270,3 +283,22 @@
 
 - 本次提交包含阅读日报定位、标题兜底、合成演示和 HTML 小票，不包含原工作区已有的音频与剪贴板修改。以上 390 项为完整工作区结果；从本次 Git 暂存内容导出的独立快照重新验证为 384 通过、0 跳过，Ruff 和暂存 diff 检查通过。
 - 前端样式入口为 `src/minicpm_tools/receipt.css`，HTML 结构入口为 `src/minicpm_tools/receipt.py`；可用 `mcpm history --demo --format receipt` 和 `--format receipt-share` 复现两种视图。
+
+## 2026-11-13 · M1：思考参数对照与合成验收
+
+- 基线 `1ef3081`，保留接手时音频、剪贴板及原进度记录的未提交修改；新增 `script/check_thinking.py`，不修改生产客户端。固定合成文本和中英文图片分别对照四组参数，直接保留未经清洗的响应；拒绝非 loopback、禁用代理／跳转，报告独立保存在 `.local/`。不下载、不注册模型，也不读取私人历史。
+- 命令 `.venv/bin/python script/check_thinking.py`：12 次请求完成，均非空、未截断，无请求错误；本机报告 `.local/acceptance/thinking-gr57kasc/report.json`。Ollama `0.40.16` 的文本模型在 baseline、template_only 下出现非空 `message.reasoning`，reasoning_only、both 未观察到；OCR 四组均未观察到。环境、digest、复现命令及解释限制见 `docs/models.md`。本次不能证明 Ollama 识别了模板参数，也不能用 OCR 的无思考基线推断参数有效。
+- `.venv/bin/python script/verify_mvp.py --output-dir .local/acceptance --only history` 通过：`.local/acceptance/mvp-d3apwqnk/report.json`，仅合成历史。Chrome 真实 summary、Safari 授权前后、整机断网均没有本轮结果，M1 仍未完成。已提供用户手动清单，当前 CLI 内部拆批重试次数不可观测，不能记为零。
+- 当前完整工作区 `.venv/bin/pytest -q -ra`：401 通过、0 跳过，含原有未提交音频／剪贴板测试；`.venv/bin/ruff check src tests script`、`git diff --check` 通过。新增 11 项测试覆盖参数矩阵、原始 reasoning／思考标记与截断、OCR 顺序、地址限制、错误继续记录和独立输出；真实模型脚本不进入 CI，仅测试使用替身。
+- 对 `history --demo` 的 markdown、receipt、receipt-share 三种格式分别导出，全部成功；检查分享 HTML 不含任何样例标题、域名或 URL，且不生成私有 Markdown，详单仍生成 HTML 与 Markdown。产物位于 `.local/acceptance/receipt-regression-r69kmkkn/`。没有重做前端视觉验收。
+
+## 2026-11-13 · M3：CI 核对、投稿草稿与规则
+
+- 已核对 `1ef30811255097fbc121214f9c858a372ed9a935` 的 [GitHub Actions #20](https://github.com/jiands233/minicpm-local-tools/actions/runs/43208079159)：2026-11-12 四个 Python／系统组合成功；Ubuntu Python 3.11 日志为 384 通过、无跳过，两个 Ubuntu 的 offline reading demo 步骤成功，macOS Python 3.12 的原生构建成功。这是上一版已推送提交，不是本轮未提交修改的远端 CI。
+- `docs/submission.md` 按官方五项结构准备中文稿，附 X 草稿和证据表；README 补 CI 徽章。真实自测反馈、合成数据、自动化测试各自标明，保留 Python／海洋主题误归类及历史失败。
+- 从官方 S2 专题页引用的页面资源核实阶段日期和赛道说明：2026-11-02 至 2026-12-13，本季列 OCR 1.0／Jev 与 V4.7，其他 MiniCPM 模型可选日常赛道。基于主线只使用 MiniCPM5-2B，材料建议按日常赛道准备；未查看或提交登记表，具体选项、日常赛道适用日期和截止时刻仍待确认，不声称已经满足 S2 资格。
+- 前端 CSS／HTML 结构未修改，最终录屏与主视觉尚未制作；本轮未提交、未推送、未发帖、未提交表单。
+
+## 2026-11-13 · 本轮推送前验证
+
+- 用户要求推送本轮验证与投稿材料。从暂存内容导出的独立快照验证：395 项测试通过、0 跳过，Ruff 与暂存 diff 检查通过。与完整工作区 401 项的差异来自本轮未包含的原有音频／剪贴板测试。此前“未提交、未推送”描述的是实现完成时的状态。

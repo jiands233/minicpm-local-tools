@@ -79,6 +79,33 @@ MINICPM_MODEL=openbmb/minicpm5 .venv/bin/mcpm doctor
 
 2026-11-12 的安装器回归使用临时微型归档，覆盖完整重用、缺库、坏库、错误符号链接、目录/文件类型冲突、空目录、硬链接、执行位丢失、混合缺失与损坏、并发目标出现以及 AppleDouble 判别。另用实际已安装运行时和固定归档运行 `install-runtime`，检查通过，未修改运行时或模型。下载权重、导入副本、临时渲染和安装归档都在 `.local/` 中并由 Git 忽略；空间不足时不要把这些文件提交进仓库。
 
+## 2026-11-13 · 思考参数对照（合成输入）
+
+手动验证脚本不进入 CI 的真实模型任务，不下载或注册模型，也不修改默认客户端参数。安装 `pdf` extra 的 Pillow 后，在项目根目录运行：
+
+```sh
+.venv/bin/python script/check_thinking.py
+```
+
+脚本读取现有 `MINICPM_BASE_URL`、`MINICPM_OCR_URL`、模型名与超时配置，也支持 `--base-url`、`--ocr-url`、`--model`、`--ocr-model`、`--timeout`。只允许 loopback、禁用代理和重定向。默认使用 macOS 的 STHeiti 字体；其他环境需通过 `--font` 指定支持中文的字体。报告目录必须位于本项目 `.local/` 下，每次创建独立私有目录，已有结果不覆盖。`started.json`、逐例 JSON 和最终 `report.json` 保留完成情况与错误；中断时已完成的逐例文件仍保留。退出码 0 表示所有请求完成、content 非空且未截断，不代表答案正确或参数已被识别。
+
+2026-11-13 实测基线为 `1ef3081` 加本轮未提交脚本及原工作区改动；报告含脚本 SHA256、Git 基线和 dirty 标记。服务 `/api/version` 返回 Ollama `0.40.16`；文本 `minicpm5-2b:latest` 为 Q4_K_M，digest `fabdd25c953d8bacbadeb1fcca22030b35fd9215c9f37a91239ad36f79efa002`；OCR `minicpm-ocr:latest` 为 Q8_0，digest `727811d364a22be87d94e993b839db11e4b57ea94b1ae8606a1109d9db83c295`。OCR projector 配置沿用现有安装。
+
+固定输入为四条虚构标题，以及两张分别包含中文、英文课程通知的合成图片。每个输入在每种组合下仅请求一次，共 12 次，温度 0、`max_tokens=2048`；OCR 始终图片在前、`Text Recognition:` 在后。直接检查 OpenAI 兼容接口原始响应，不经过 `LocalClient.chat()` 的思考文本清理。
+
+| 参数组合 | 文本：非空 reasoning 字段 | 中文 OCR：非空 reasoning 字段 | 英文 OCR：非空 reasoning 字段 |
+|---|---|---|---|
+| 不带两种控制参数 | 有 | 无 | 无 |
+| 仅 `chat_template_kwargs.enable_thinking=false` | 有 | 无 | 无 |
+| 仅 `reasoning_effort=none` | 无 | 无 | 无 |
+| 两者同时提供（当前客户端） | 无 | 无 | 无 |
+
+所有响应均未出现 `<think>` 文本标记，均为非空 content、`finish_reason=stop`，无请求错误或截断。文本前两组的思考在 `message.reasoning` 内，说明只查 content 会漏检。八次 OCR 输出在这两张简单图片上与预设文字一致，不代表真实图片 OCR 准确率。
+
+这次文本样例中，单独提供 `chat_template_kwargs` 未消除可见 reasoning，而包含 `reasoning_effort=none` 的组合没有观察到 reasoning。OCR 的无参数基线也没有 reasoning，无法从本次结果区分参数是否生效。**没有观察到思考不等于参数被服务识别，也不证明模型内部没有推理。** 各组合顺序执行，包含模型加载和缓存差异，耗时不用于性能比较。默认客户端未改动。
+
+原始证据：`.local/acceptance/thinking-gr57kasc/report.json` 及同目录逐例文件、合成图片；只在本机保留，不提交原始响应。脚本本身及固定输入可用于复现。
+
 ## 已固定的来源
 
 | 组件 ID | Ollama 名称 / 用法 | 来源 |

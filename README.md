@@ -1,5 +1,7 @@
 # MiniCPM 本地阅读日报
 
+[![CI](https://github.com/jiands233/minicpm-local-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/jiands233/minicpm-local-tools/actions/workflows/ci.yml)
+
 把浏览历史整理成可核对的本地阅读日报。macOS 上读取 Chrome 或 Safari 的访问记录，可用本地 MiniCPM5-2B 按标题和域名归类，输出 Markdown。
 
 - **来源可核对**：程序渲染原始标题和脱敏链接；模型只给记录分组。编号遗漏、重复或不存在时会重试，最终失败则拒绝输出摘要。脱敏链接可能无法返回原页面。
