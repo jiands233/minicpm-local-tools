@@ -135,10 +135,27 @@ def read_text_file(path: Path) -> str:
         return source.read(MAX_TEXT + 1)
 
 
+def client_for_action(action: str) -> LocalClient:
+    """Validate only the local services used by this clipboard action."""
+    options = LocalClient.env_options()
+    # Clipboard processing never requests embeddings. Unrelated invalid
+    # configuration should not prevent text or image processing.
+    options["embedding_url"] = None
+    if action in ("translate", "rewrite", "todos"):
+        options["ocr_url"] = None
+    elif action == "ocr":
+        # OCR-only can use a separately configured OCR service even when the
+        # text endpoint is unavailable or invalid.
+        options["base_url"] = options["ocr_url"] or options["base_url"]
+        options["ocr_url"] = None
+    # image-todos performs OCR followed by text inference and needs both.
+    return LocalClient(**options)
+
+
 def run(args: argparse.Namespace) -> int:
     if args.apply and (args.text is not None or args.file or args.image or args.stdin):
         raise ToolError("--apply 只用于当前剪贴板；文件/文本输入请预览后自行复制。")
-    client = LocalClient.from_env()
+    client = client_for_action(args.action)
     snapshot = None
     if args.image:
         if args.action not in ("ocr", "image-todos"):

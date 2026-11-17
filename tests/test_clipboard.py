@@ -3,6 +3,7 @@
 import argparse
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -55,7 +56,7 @@ class ClipboardTests(unittest.TestCase):
             args = argparse.Namespace(action="todos", apply=False, text=None, file=str(path),
                                       image=None, stdin=False, language="中文")
             client = FakeClient()
-            with patch.object(clipboard.LocalClient, "from_env", return_value=client):
+            with patch.object(clipboard, "client_for_action", return_value=client):
                 path.write_text("鲸" * clipboard.MAX_TEXT, encoding="utf-8")
                 clipboard.run(args)
                 self.assertEqual(client.prompts[0][0], "鲸" * clipboard.MAX_TEXT)
@@ -110,7 +111,7 @@ class ClipboardTests(unittest.TestCase):
             patch.object(
                 clipboard, "bridge_call", return_value={"text": "input", "change_count": 7}
             ) as bridge,
-            patch.object(clipboard.LocalClient, "from_env") as factory,
+            patch.object(clipboard, "client_for_action") as factory,
         ):
             factory.return_value.chat.side_effect = ToolError("服务不可用")
             with self.assertRaises(ToolError):
@@ -133,7 +134,7 @@ class ClipboardTests(unittest.TestCase):
                 "bridge_call",
                 side_effect=[{"text": "input", "change_count": 17}, {"ok": True}],
             ) as bridge,
-            patch.object(clipboard.LocalClient, "from_env", return_value=FakeClient()),
+            patch.object(clipboard, "client_for_action", return_value=FakeClient()),
         ):
             clipboard.run(args)
         self.assertEqual(bridge.call_args.args, ("--replace", "17"))
@@ -152,7 +153,7 @@ class ClipboardTests(unittest.TestCase):
             patch.object(
                 clipboard, "bridge_call", return_value={"text": "input", "change_count": 7}
             ) as bridge,
-            patch.object(clipboard.LocalClient, "from_env", return_value=FakeClient()),
+            patch.object(clipboard, "client_for_action", return_value=FakeClient()),
         ):
             clipboard.run(args)
         bridge.assert_called_once_with("--snapshot-text")
@@ -166,7 +167,7 @@ class ClipboardTests(unittest.TestCase):
             snapshot = {"image_png": base64.b64encode(b"test PNG bytes").decode()}
             with (
                 patch.object(clipboard, "bridge_call", return_value=snapshot) as bridge,
-                patch.object(clipboard.LocalClient, "from_env", return_value=FakeClient()),
+                patch.object(clipboard, "client_for_action", return_value=FakeClient()),
             ):
                 clipboard.run(args)
             bridge.assert_called_once_with("--snapshot-image")
@@ -183,6 +184,50 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], [
             "/bridge", "--bridge-version", "--self-test-timeouts", "--self-test"
         ])
+
+    def test_each_action_validates_only_the_services_it_uses(self):
+        good_text = "http://127.0.0.1:11434/v1"
+        good_ocr = "http://127.0.0.1:11435/v1"
+        invalid = "https://example.com/v1"
+        with patch.dict(os.environ, {
+            "MINICPM_BASE_URL": good_text,
+            "MINICPM_OCR_URL": invalid,
+            "MINICPM_EMBED_URL": invalid,
+            "MINICPM_TIMEOUT": "10",
+        }, clear=True):
+            for action in ("translate", "rewrite", "todos"):
+                client = clipboard.client_for_action(action)
+                self.assertEqual(client.base_url, good_text)
+                self.assertEqual(client.timeout, 10)
+            for action in ("ocr", "image-todos"):
+                with self.assertRaises(ToolError):
+                    clipboard.client_for_action(action)
+        with patch.dict(os.environ, {
+            "MINICPM_BASE_URL": invalid,
+            "MINICPM_OCR_URL": good_ocr,
+            "MINICPM_EMBED_URL": invalid,
+            "MINICPM_TIMEOUT": "10",
+        }, clear=True):
+            client = clipboard.client_for_action("ocr")
+            self.assertEqual(client.ocr_url, good_ocr)
+            for action in ("translate", "rewrite", "todos", "image-todos"):
+                with self.assertRaises(ToolError):
+                    clipboard.client_for_action(action)
+        with patch.dict(os.environ, {
+            "MINICPM_BASE_URL": good_text,
+            "MINICPM_OCR_URL": good_ocr,
+            "MINICPM_EMBED_URL": invalid,
+            "MINICPM_TIMEOUT": "10",
+        }, clear=True):
+            client = clipboard.client_for_action("image-todos")
+            self.assertEqual(client.base_url, good_text)
+            self.assertEqual(client.ocr_url, good_ocr)
+            for action in clipboard.ACTIONS:
+                with (
+                    patch.dict(os.environ, {"MINICPM_TIMEOUT": "invalid"}),
+                    self.assertRaises(ToolError),
+                ):
+                    clipboard.client_for_action(action)
 
     def test_bridge_probe_invalid_or_timeout_fails_before_read(self):
         for outcome in (

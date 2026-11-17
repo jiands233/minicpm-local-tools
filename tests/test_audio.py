@@ -67,6 +67,31 @@ def test_undecided_metadata_rule_does_not_drop_explicit_or_longer_phrases(phrase
     assert rejected == 0
 
 
+@pytest.mark.parametrize('phrase', [
+    '能否请小王明天下午提交报告？',
+    '可否麻烦大家周五检查数据？',
+])
+def test_model_selected_polite_requests_are_not_dropped_as_questions(phrase):
+    source = Segment(0, 2, phrase)
+    items, rejected = grounded_items(
+        [{'segment_id': 's1', 'evidence': phrase}], {'s1': source}, action=True
+    )
+    assert [item['text'] for item in items] == [phrase]
+    assert rejected == 0
+
+
+@pytest.mark.parametrize('phrase', [
+    '能否在周五前完成？', '可否增加一组对照实验？', '是否需要增加对照实验？',
+])
+def test_model_selected_open_questions_remain_excluded_from_actions(phrase):
+    source = Segment(0, 2, phrase)
+    items, rejected = grounded_items(
+        [{'segment_id': 's1', 'evidence': phrase}], {'s1': source}, action=True
+    )
+    assert items == []
+    assert rejected == 1
+
+
 def test_actions_require_real_citation_and_owner_in_evidence():
     sources = {'s1': Segment(0, 4, '下周整理实验报告。')}
     result, rejected = grounded_items([

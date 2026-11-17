@@ -332,7 +332,12 @@ def grounded_items(items: object, sources: dict[str, Segment], *, action=False) 
         if action and _UNDECIDED_METADATA.fullmatch(evidence):
             rejected += 1
             continue
-        if action and re.match(r"^(是否|要不要|能否|可否|should\s+we|whether\b)", evidence, re.IGNORECASE):
+        # A polite request can begin with 能否/可否 but still explicitly asks
+        # someone to act. Preserve it for review if the model selected it.
+        polite_request = re.match(r"^(?:能否|可否)(?:请(?!示)|麻烦)", evidence)
+        if action and not polite_request and re.match(
+            r"^(是否|要不要|能否|可否|should\s+we|whether\b)", evidence, re.IGNORECASE
+        ):
             rejected += 1
             continue
         if action and re.search(r"已(?:经|經)?完成|\b(?:is|was) complete(?:d)?\b", evidence, re.IGNORECASE) and not re.search(r"需要|需|要|\bwill\b|\bneed\b", evidence, re.IGNORECASE):
