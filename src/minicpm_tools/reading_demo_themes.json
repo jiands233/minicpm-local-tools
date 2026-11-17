@@ -41,5 +41,56 @@
       }
     ]
   },
-  "raw_response": "```json\n{\n  \"themes\": [\n    {\n      \"label\": \"Python 编程与自然\",\n      \"ids\": [1, 2, 3, 4, 13, 14, 15, 16]\n    },\n    {\n      \"label\": \"花园与阳台\",\n      \"ids\": [5, 6, 7, 8]\n    },\n    {\n      \"label\": \"京都与旅行\",\n      \"ids\": [9, 10, 11, 12]\n    }\n  ]\n}\n```"
+  "raw_response": "```json\n{\n  \"themes\": [\n    {\n      \"label\": \"Python 编程与自然\",\n      \"ids\": [1, 2, 3, 4, 13, 14, 15, 16]\n    },\n    {\n      \"label\": \"花园与阳台\",\n      \"ids\": [5, 6, 7, 8]\n    },\n    {\n      \"label\": \"京都与旅行\",\n      \"ids\": [9, 10, 11, 12]\n    }\n  ]\n}\n```",
+  "overview": {
+    "metadata": {
+      "model": "minicpm5-2b",
+      "quantization": "Q4_K_M",
+      "date": "2026-11-18",
+      "baseline_commit": "0229d67",
+      "sampled_count": 16,
+      "source": "本机隔离 Ollama（loopback，禁云）；仅提交抽样标题（不含域名）；虚构记录"
+    },
+    "response": {
+      "insights": [
+        {
+          "text": "Python编程相关内容",
+          "ids": [
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        {
+          "text": "阳台种植与园艺养护",
+          "ids": [
+            5,
+            6,
+            7,
+            8
+          ]
+        },
+        {
+          "text": "京都旅游与出行指南",
+          "ids": [
+            9,
+            10,
+            11,
+            12
+          ]
+        },
+        {
+          "text": "海洋生物与生态保护",
+          "ids": [
+            13,
+            14,
+            15,
+            16
+          ]
+        }
+      ]
+    },
+    "raw_response": "```json\n{\n  \"insights\": [\n    {\n      \"text\": \"Python编程相关内容\",\n      \"ids\": [1, 2, 3, 4]\n    },\n    {\n      \"text\": \"阳台种植与园艺养护\",\n      \"ids\": [5, 6, 7, 8]\n    },\n    {\n      \"text\": \"京都旅游与出行指南\",\n      \"ids\": [9, 10, 11, 12]\n    },\n    {\n      \"text\": \"海洋生物与生态保护\",\n      \"ids\": [13, 14, 15, 16]\n    }\n  ]\n}\n```"
+  }
 }

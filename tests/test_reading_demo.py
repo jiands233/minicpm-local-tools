@@ -54,7 +54,31 @@ def test_demo_database_refuses_overwrite(tmp_path):
     assert path.read_text() == "existing"
 
 
+def test_demo_rejects_corrupted_overview_without_partial_output(tmp_path, monkeypatch, capsys):
+    for bad_id in (17, 999):
+        monkeypatch.setattr(
+            history,
+            "_load_demo_overview",
+            lambda bad=bad_id: {"insights": [{"text": "无效引用", "ids": [bad]}]},
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["mcpm", "history", "--demo", "--format", "receipt", "--output-dir", str(tmp_path)],
+        )
+        assert cli.main() == 1
+        result = capsys.readouterr()
+        assert result.out == ""
+        assert "概览" in result.err
+        assert list(tmp_path.iterdir()) == []
+
+
 def test_demo_packaged_response_keeps_raw_model_output():
     path = Path(history.__file__).with_name("reading_demo_themes.json")
     data = json.loads(path.read_text())
     assert data["response"] == history.parse_json(data["raw_response"])
+    assert data["overview"]["response"] == history.parse_json(data["overview"]["raw_response"])
+    entries, *_ = history.demo_data()
+    insights, sampled = history.demo_overview(entries)
+    assert sampled == 16
+    assert 1 <= len(insights) <= 5

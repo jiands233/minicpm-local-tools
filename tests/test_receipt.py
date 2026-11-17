@@ -27,6 +27,44 @@ def test_share_has_no_hidden_details():
     assert '主题名称仍可能涉及隐私' in html
 
 
+def test_overview_escapes_analysis_and_links_to_evidence():
+    entries, day, zone, _ = history.demo_data()
+    groups = [('甲', list(range(1, 19)))]
+    overview_data = ([('<script>分析</script>', [1, 2])], 18)
+    html = receipt.render_receipt(entries, day, zone, groups, overview=overview_data)
+    overview = html.split('<aside class="overview">', 1)[1].split('</aside>', 1)[0]
+    assert '&lt;script&gt;分析&lt;/script&gt;' in overview
+    assert 'href="#record-1"' in overview and 'id="record-1"' in html
+    assert '未读取正文' in overview
+    assert '今日概览' not in receipt.render_receipt(entries, day, zone, groups, share=True,
+                                                    overview=overview_data)
+    assert '<aside class="overview">' not in receipt.render_receipt(entries, day, zone)
+
+
+def test_content_overview_checks_model_references():
+    entries, _, _, _ = history.demo_data()
+    prompts = []
+
+    class Client:
+        def chat(self, prompt):
+            prompts.append(prompt)
+            return '{"insights":[{"text":"网页涉及编程","ids":[1,1,2,3,4,5,6]}]}'
+
+    items, sampled = history.content_overview(entries, Client())
+    assert items == [('网页涉及编程', [1, 2, 3, 4, 5])]
+    assert sampled == 16
+    assert 'example.org' not in prompts[0]
+    assert '\n17 ' not in prompts[0]
+
+    for bad_ids in ('[999]', '[1,2,3,4,5,999]', '[17]'):
+        class BadClient:
+            def chat(self, prompt, ids=bad_ids):
+                return f'{{"insights":[{{"text":"编造","ids":{ids}}}]}}'
+
+        with pytest.raises(ToolError):
+            history.content_overview(entries, BadClient())
+
+
 def test_html_escapes_model_and_title():
     entries, day, zone, _ = history.demo_data()
     entries = entries[:1]
@@ -35,6 +73,28 @@ def test_html_escapes_model_and_title():
     assert '<script>' not in html and '<img ' not in html
     assert '&lt;script&gt;' in html and '&lt;img ' in html
     assert "default-src 'none'" in html
+
+
+def test_receipt_escapes_terminal_and_bidi_controls():
+    entries = [{
+        'id': 1,
+        'time': '08:30',
+        'title': 'Page\x1b]52;c;payload\x07\u202e',
+        'url': 'https://example.com/\x1b[0m/\u202e',
+        'domain': 'example.com\u202e',
+        'visits': 1,
+        'link_redacted': False,
+    }]
+    groups = [('Topic\x1b[0m\u202e', [1])]
+    overview = ([('Insight\x9b\u202e', [1])], 1)
+    html = receipt.render_receipt(entries, '2026-11-12', 'Asia/Shanghai', groups, overview=overview)
+    for raw_char in ('\x1b', '\x07', '\x9b', '\u202e'):
+        assert raw_char not in html
+    assert r'\x1b' in html and r'\x07' in html and r'\x9b' in html and r'\u202e' in html
+    assert '%1B' in html and '%E2%80%AE' in html
+    share_html = receipt.render_receipt(entries, '2026-11-12', 'Asia/Shanghai', groups, share=True)
+    for raw_char in ('\x1b', '\x07', '\u202e'):
+        assert raw_char not in share_html
 
 
 def test_list_empty_and_approximate():
@@ -49,6 +109,14 @@ def test_invalid_group_fails_before_output():
     entries, day, zone, _ = history.demo_data()
     with pytest.raises(ToolError):
         receipt.render_receipt(entries, day, zone, [('wrong', [999])])
+    groups = [('甲', list(range(1, 19)))]
+    for bad_overview in (
+        ([('越界引用', [999])], 16),
+        ([('非整数引用', ['1'])], 16),
+        ([('空白', [1])], -1),
+    ):
+        with pytest.raises(ToolError):
+            receipt.render_receipt(entries, day, zone, groups, overview=bad_overview)
 
 
 def test_receipt_existing_markdown_prevents_html(tmp_path):
@@ -81,6 +149,14 @@ def test_cli_demo_exports_no_personal_history(tmp_path, monkeypatch, capsys, mod
                                     '--output-dir', str(tmp_path)])
     assert cli.main() == 0
     assert len(list(tmp_path.iterdir())) == expected
+    if mode == 'receipt':
+        html = (tmp_path / '2026-11-12-reading.html').read_text(encoding='utf-8')
+        assert '今日概览' in html and '抽样的 16 条' in html
+        assert '主题与概览为预录的 MiniCPM5-2B 输出' in html
+    else:
+        html = (tmp_path / '2026-11-12-reading-share.html').read_text(encoding='utf-8')
+        assert '今日概览' not in html
+        assert '主题为预录的 MiniCPM5-2B 输出' in html
     capsys.readouterr()
     assert cli.main() == 1
     assert '拒绝覆盖' in capsys.readouterr().err
